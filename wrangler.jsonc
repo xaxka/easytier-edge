@@ -1,0 +1,32 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "easytier-edge",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-07-21",
+	"compatibility_flags": ["nodejs_compat"],
+	"migrations": [
+		{
+			"new_sqlite_classes": ["EasyTierServer"],
+			"tag": "v1"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "EasyTierServer",
+				"name": "EASYTIER_SERVER"
+			}
+		]
+	},
+	"vars": {
+		"EASYTIER_HOSTNAME": "edge",
+		"MAX_FRAME_BYTES": "1048576"
+	},
+	"placement": {
+		"mode": "smart"
+	},
+	"observability": {
+		"enabled": true
+	},
+	"upload_source_maps": true
+}

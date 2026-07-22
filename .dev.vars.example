@@ -1,0 +1,4 @@
+EASYTIER_NETWORKS=[{"network_name":"office","network_secret":"use-a-long-random-secret"},{"network_name":"lab","network_secret":"another-long-random-secret"}]
+LOCAL_PRIVATE_KEY=base64-encoded-32-byte-x25519-private-key
+LOCAL_PUBLIC_KEY=base64-encoded-32-byte-x25519-public-key
+EASYTIER_HOSTNAME=edge

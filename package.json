@@ -1,0 +1,28 @@
+{
+	"name": "easytier-edge",
+	"version": "0.1.0",
+	"private": true,
+	"packageManager": "pnpm@11.3.0",
+	"type": "module",
+	"description": "A secure, multi-network EasyTier WebSocket relay for Cloudflare Workers",
+	"scripts": {
+		"build:wasm": "node scripts/build-wasm.mjs",
+		"keys": "node scripts/generate-keypair.mjs",
+		"build": "pnpm run build:wasm && wrangler deploy --dry-run --outdir dist",
+		"deploy": "pnpm run build:wasm && wrangler deploy",
+		"dev": "pnpm run build:wasm && wrangler dev",
+		"start": "pnpm run dev",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"typecheck": "tsc --noEmit",
+		"check": "pnpm run typecheck && pnpm run test",
+		"cf-typegen": "wrangler types"
+	},
+	"devDependencies": {
+		"@types/node": "^26.1.1",
+		"typescript": "^5.9.3",
+		"vitest": "^4.1.10",
+		"wasm-pack": "^0.15.0",
+		"wrangler": "^4.112.0"
+	}
+}

@@ -1,0 +1,44 @@
+[package]
+name = "easytier-edge-wasm"
+version = "2.6.4"
+edition = "2024"
+rust-version = "1.95"
+license = "LGPL-3.0"
+description = "WebAssembly protocol core for the easytier-edge Cloudflare relay"
+repository = "https://github.com/fordes123/easytier-edge"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aes-gcm = "0.10"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+hmac = "0.12"
+js-sys = "0.3"
+prost = "0.13"
+prost-types = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+snow = { version = "0.10", default-features = false, features = ["default-resolver", "default-resolver-crypto"] }
+wasm-bindgen = "0.2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[build-dependencies]
+prost-build = "0.13"
+protoc-bin-vendored = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[workspace]
