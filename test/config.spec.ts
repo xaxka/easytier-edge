@@ -91,10 +91,10 @@ describe("readServerConfig", () => {
 		);
 	});
 
-	it("defaults CONNECTION_MODE to secure", () => {
-		expect(readServerConfig(env()).connectionMode).toBe("secure");
-		expect(readServerConfig(env({ CONNECTION_MODE: "" })).connectionMode).toBe("secure");
-		expect(readServerConfig(env({ CONNECTION_MODE: undefined })).connectionMode).toBe("secure");
+	it("defaults CONNECTION_MODE to auto", () => {
+		expect(readServerConfig(env()).connectionMode).toBe("auto");
+		expect(readServerConfig(env({ CONNECTION_MODE: "" })).connectionMode).toBe("auto");
+		expect(readServerConfig(env({ CONNECTION_MODE: undefined })).connectionMode).toBe("auto");
 	});
 
 	it("accepts legacy and auto connection modes case-insensitively", () => {

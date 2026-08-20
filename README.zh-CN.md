@@ -38,7 +38,7 @@ Durable Object
 - 有界 RPC 分片、事务跟踪和防重放状态
 - 中继链路具备帧大小、跳数和发送容量限制
 - 可选 `DISABLE_RELAY_DATA=true`:仅保留控制面(信令),丢弃节点间数据面转发,并通过 `avoid_relay_data` 特性标志告知节点(对齐上游 EasyTier 的 `disable_relay_data`)
-- 通过 `CONNECTION_MODE` 切换握手方式:`secure`(默认,仅 Noise XX 安全握手)、`legacy`(EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端)或 `auto`(按首包类型自动二选一)
+- 通过 `CONNECTION_MODE` 切换握手方式:`auto`(默认,按首包类型自动二选一)、`secure`(仅 Noise XX 安全握手)、`legacy`(EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端)
 
 ## 部署
 
@@ -86,7 +86,7 @@ EASYTIER_HOSTNAME=edge
 | `DISABLE_RELAY_DATA` | 否 | 默认 `false`。设为 `true` 时仅转发控制面(路由同步、节点发现、打洞协调、Ping/Pong),丢弃节点间数据面转发,并在路由信息中发布 `avoid_relay_data`。 |
 | `MAX_FRAME_BYTES` | 否 | 单帧上限，默认 1 MiB，允许范围为 1 KiB–16 MiB。 |
 | `MAX_PENDING_PER_IP` | 否 | 同一出口 IP 并发未完成握手连接的上限，默认 `17`，允许范围 1–2048。仅限流握手阶段,不影响共享 NAT 出口已认证节点。 |
-| `CONNECTION_MODE` | 否 | 握手方式选择器。`secure`(默认):仅接受 Noise XX 安全握手。`legacy`:仅接受 EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端。`auto`:按首包类型自动接受两种握手。legacy 模式下传输层不加密。 |
+| `CONNECTION_MODE` | 否 | 握手方式选择器。`auto`(默认):按首包类型自动接受两种握手。`secure`:仅接受 Noise XX 安全握手。`legacy`:仅接受 EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端。legacy 模式下传输层不加密。 |
 
 通过 Wrangler 写入生产凭据：
 
@@ -110,9 +110,9 @@ easytier-core \
 
 服务端强制 private-mode 语义：只有 `network_name` 与 `network_secret` 均匹配且完成 `NetworkSecretConfirmed` 认证的节点才能接入，其他网络身份一律拒绝。
 
-### 接入无法配置安全模式的客户端(`CONNECTION_MODE=legacy` 或 `auto`)
+### 接入无法配置安全模式的客户端(默认 `auto`)
 
-部分客户端(旧版本、GUI 前端、嵌入式移植)无法配置 secure mode。将 `CONNECTION_MODE` 设为 `legacy`(仅明文握手)或 `auto`(两种握手均可),即可在不加 `--secure-mode` 的情况下接入:
+部分客户端(旧版本、GUI 前端、嵌入式移植)无法配置 secure mode。默认的 `CONNECTION_MODE=auto` 下它们无需 `--secure-mode` 即可直接接入;若只想接受明文握手,可显式设为 `legacy`:
 
 ```bash
 easytier-core \

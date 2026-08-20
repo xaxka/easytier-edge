@@ -4,9 +4,9 @@ interface RoomConfig {
 
 /**
  * 握手方式:
- * - `secure`: 仅接受 Noise XX 安全握手(默认,与旧版行为一致)。
+ * - `auto`: 按首包类型自动选择两种握手之一(默认)。
+ * - `secure`: 仅接受 Noise XX 安全握手。
  * - `legacy`: 仅接受旧版 Handshake 握手,面向无法配置 secure mode 的客户端。
- * - `auto`: 按首包类型自动选择两种握手之一。
  */
 export type ConnectionMode = "secure" | "legacy" | "auto";
 
@@ -79,7 +79,8 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 	// DISABLE_RELAY_DATA=true 时只保留控制面(信令),丢弃节点间数据面转发,
 	// 与上游 EasyTier 的 disable_relay_data / avoid_relay_data 语义一致。
 	const disableRelayData = parseBoolean(env.DISABLE_RELAY_DATA, "DISABLE_RELAY_DATA");
-	// CONNECTION_MODE 切换握手方式:secure(默认)/ legacy / auto。
+	// CONNECTION_MODE 切换握手方式:auto(默认)/ secure / legacy。
+	// auto 按首包类型自动选择:Noise XX 安全握手或旧版明文握手。
 	// legacy 模式面向无法配置 secure mode 的客户端,传输层不加密,
 	// 身份认证依赖 network_secret 摘要匹配。
 	const connectionMode = parseConnectionMode(env.CONNECTION_MODE);
@@ -126,7 +127,7 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 }
 
 function parseConnectionMode(value: string | undefined): ConnectionMode {
-	if (value === undefined || value === "") return "secure";
+	if (value === undefined || value === "") return "auto";
 	const normalized = value.trim().toLowerCase();
 	if (normalized === "secure" || normalized === "legacy" || normalized === "auto") {
 		return normalized;

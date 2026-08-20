@@ -12,8 +12,8 @@ NETWORK_SECRET=use-a-long-random-secret
 # LOCAL_PUBLIC_KEY=base64-encoded-32-byte-x25519-public-key
 
 # 可选:握手方式选择器。
-# - secure(默认):仅接受 Noise XX 安全握手(客户端需 --secure-mode)。
+# - auto(默认):按客户端首包类型自动接受两种握手。
+# - secure:仅接受 Noise XX 安全握手(客户端需 --secure-mode)。
 # - legacy:仅接受旧版明文 HandShake 握手,凭网络密码摘要认证,
 #   面向无法配置 secure mode 的客户端(GUI/旧版/嵌入式)。传输层不加密。
-# - auto:按客户端首包类型自动接受两种握手。
 # CONNECTION_MODE=auto
