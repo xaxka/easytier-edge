@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { SecurePeer } from "./wasm";
+import { SecurePeer, generate_keypair } from "./wasm";
 import { ENCRYPTED_FLAG, PacketType, SERVER_PEER_ID } from "./core/constants";
 import { type EasyTierEnv, type ServerConfig, readServerConfig } from "./core/config";
 import {
@@ -16,7 +16,11 @@ import {
 	disposeConnection,
 } from "./runtime/connection";
 import { errorMessage } from "./runtime/errors";
-import { parseAuthenticationInfo, parseHandshakeInfo } from "./runtime/messages";
+import {
+	parseAuthenticationInfo,
+	parseGeneratedKeypair,
+	parseHandshakeInfo,
+} from "./runtime/messages";
 import { RoomRegistry } from "./runtime/rooms";
 
 const MAX_CONNECTIONS = 2_048;
@@ -24,6 +28,8 @@ const MAX_CONNECTIONS = 2_048;
 export class EasyTierServer extends DurableObject<EasyTierEnv> {
 	private readonly config: ServerConfig;
 	private readonly rpc: EasyTierRpc;
+	private readonly localPrivateKey: string;
+	private readonly localPublicKey: string;
 	private readonly connections = new Map<WebSocket, Connection>();
 	private readonly rooms = new RoomRegistry();
 	private maintenanceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -31,8 +37,20 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 	constructor(ctx: DurableObjectState, env: EasyTierEnv) {
 		super(ctx, env);
 		this.config = readServerConfig(env);
+		// 未配置密钥时生成临时 X25519 身份(对应 EasyTier secure mode
+		// "同一信任域"场景);在 DO 生命周期内保持不变,重启后自动更换。
+		const generated = this.config.localPrivateKey && this.config.localPublicKey
+			? undefined
+			: parseGeneratedKeypair(generate_keypair());
+		const localPrivateKey = this.config.localPrivateKey ?? generated?.privateKey;
+		const localPublicKey = this.config.localPublicKey ?? generated?.publicKey;
+		if (!localPrivateKey || !localPublicKey) {
+			throw new Error("failed to resolve the secure-mode X25519 keypair");
+		}
+		this.localPrivateKey = localPrivateKey;
+		this.localPublicKey = localPublicKey;
 		this.rpc = new EasyTierRpc(
-			this.config.localPublicKeyBytes,
+			this.config.localPublicKeyBytes ?? decodeBase64Key(localPublicKey),
 			this.config.hostname,
 			SERVER_PEER_ID,
 		);
@@ -51,8 +69,8 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		let secure: SecurePeer;
 		try {
 			secure = new SecurePeer(
-				this.config.localPrivateKey,
-				this.config.localPublicKey,
+				this.localPrivateKey,
+				this.localPublicKey,
 				SERVER_PEER_ID,
 			);
 		} catch (error) {
@@ -297,4 +315,13 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			this.removeConnection(connection);
 		}
 	}
+}
+
+function decodeBase64Key(value: string): Uint8Array {
+	const binary = atob(value);
+	const decoded = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+	if (decoded.byteLength !== 32) {
+		throw new Error("generated public key must decode to exactly 32 bytes");
+	}
+	return decoded;
 }

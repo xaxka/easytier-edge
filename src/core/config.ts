@@ -4,18 +4,21 @@ interface RoomConfig {
 
 export interface ServerConfig {
 	rooms: ReadonlyMap<string, RoomConfig>;
+	networkName: string;
+	networkSecret: string;
 	hostname: string;
-	localPrivateKey: string;
-	localPublicKey: string;
-	localPublicKeyBytes: Uint8Array;
+	localPrivateKey?: string;
+	localPublicKey?: string;
+	localPublicKeyBytes?: Uint8Array;
 	maxFrameBytes: number;
 }
 
 export interface EasyTierEnv {
 	EASYTIER_SERVER: DurableObjectNamespace;
-	EASYTIER_NETWORKS: string;
-	LOCAL_PRIVATE_KEY: string;
-	LOCAL_PUBLIC_KEY: string;
+	NETWORK_NAME: string;
+	NETWORK_SECRET: string;
+	LOCAL_PRIVATE_KEY?: string;
+	LOCAL_PUBLIC_KEY?: string;
 	EASYTIER_HOSTNAME?: string;
 	MAX_FRAME_BYTES?: string;
 }
@@ -23,45 +26,28 @@ export interface EasyTierEnv {
 const UTF8_ENCODER = new TextEncoder();
 
 export function readServerConfig(env: EasyTierEnv): ServerConfig {
-	if (!env.LOCAL_PRIVATE_KEY || !env.LOCAL_PUBLIC_KEY) {
-		throw new Error("secure_mode requires LOCAL_PRIVATE_KEY and LOCAL_PUBLIC_KEY");
+	const networkName = requireText(env.NETWORK_NAME, "NETWORK_NAME");
+	const networkNameBytes = UTF8_ENCODER.encode(networkName).byteLength;
+	if (networkNameBytes === 0 || networkNameBytes > 255) {
+		throw new Error("NETWORK_NAME must be a non-empty string of at most 255 bytes");
 	}
-	const privateBytes = decodeBase64Key(env.LOCAL_PRIVATE_KEY, "LOCAL_PRIVATE_KEY");
-	const publicBytes = decodeBase64Key(env.LOCAL_PUBLIC_KEY, "LOCAL_PUBLIC_KEY");
-	if (privateBytes.every((byte) => byte === 0) || publicBytes.every((byte) => byte === 0)) {
-		throw new Error("secure_mode keys must not be all-zero values");
+	const networkSecret = requireText(env.NETWORK_SECRET, "NETWORK_SECRET");
+	if (networkSecret.length === 0) {
+		throw new Error("NETWORK_SECRET must be a non-empty string");
 	}
+	const rooms = new Map<string, RoomConfig>([
+		[networkName, { network_secret: networkSecret }],
+	]);
 
-	let input: unknown;
-	try {
-		input = JSON.parse(env.EASYTIER_NETWORKS);
-	} catch {
-		throw new Error("EASYTIER_NETWORKS must be a JSON array");
-	}
-	if (!Array.isArray(input) || input.length === 0) {
-		throw new Error("EASYTIER_NETWORKS must configure at least one network");
-	}
-	const rooms = new Map<string, RoomConfig>();
-	for (const candidate of input) {
-		if (!isRecord(candidate)) {
-			throw new Error("each EASYTIER_NETWORKS entry must be an object");
-		}
-		const networkName = candidate.network_name;
-		const networkSecret = candidate.network_secret;
-		if (typeof networkName !== "string") {
-			throw new Error("each room requires a non-empty network_name of at most 255 bytes");
-		}
-		const networkNameBytes = UTF8_ENCODER.encode(networkName).byteLength;
-		if (networkNameBytes === 0 || networkNameBytes > 255) {
-			throw new Error("each room requires a non-empty network_name of at most 255 bytes");
-		}
-		if (typeof networkSecret !== "string" || networkSecret.length === 0) {
-			throw new Error(`room ${networkName} requires a non-empty network_secret`);
-		}
-		if (rooms.has(networkName)) {
-			throw new Error(`duplicate network_name: ${networkName}`);
-		}
-		rooms.set(networkName, { network_secret: networkSecret });
+	// 密钥对是可选的:未配置时服务端会在启动时生成临时 X25519 密钥,
+	// 对应 EasyTier 官方 secure mode "同一信任域" 场景,
+	// 节点只需 --network-name / --network-secret / --secure-mode 即可接入。
+	const hasPrivateKey = Boolean(env.LOCAL_PRIVATE_KEY);
+	const hasPublicKey = Boolean(env.LOCAL_PUBLIC_KEY);
+	if (hasPrivateKey !== hasPublicKey) {
+		throw new Error(
+			"LOCAL_PRIVATE_KEY and LOCAL_PUBLIC_KEY must be configured together or omitted",
+		);
 	}
 
 	const maxFrameBytes = Number(env.MAX_FRAME_BYTES ?? 1_048_576);
@@ -77,14 +63,38 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 		throw new Error("EASYTIER_HOSTNAME must be a non-empty string of at most 255 bytes");
 	}
 
+	if (!hasPrivateKey) {
+		return {
+			rooms,
+			networkName,
+			networkSecret,
+			hostname,
+			maxFrameBytes,
+		};
+	}
+
+	const privateKey = env.LOCAL_PRIVATE_KEY as string;
+	const publicKey = env.LOCAL_PUBLIC_KEY as string;
+	const publicBytes = decodeBase64Key(publicKey, "LOCAL_PUBLIC_KEY");
+	decodeBase64Key(privateKey, "LOCAL_PRIVATE_KEY");
+
 	return {
 		rooms,
+		networkName,
+		networkSecret,
 		hostname,
-		localPrivateKey: env.LOCAL_PRIVATE_KEY,
-		localPublicKey: env.LOCAL_PUBLIC_KEY,
+		localPrivateKey: privateKey,
+		localPublicKey: publicKey,
 		localPublicKeyBytes: publicBytes,
 		maxFrameBytes,
 	};
+}
+
+function requireText(value: string | undefined, name: string): string {
+	if (typeof value !== "string" || value.length === 0) {
+		throw new Error(`${name} is required`);
+	}
+	return value;
 }
 
 function decodeBase64Key(value: string, name: string): Uint8Array {
@@ -99,8 +109,4 @@ function decodeBase64Key(value: string, name: string): Uint8Array {
 		throw new Error(`${name} must decode to exactly 32 bytes`);
 	}
 	return decoded;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

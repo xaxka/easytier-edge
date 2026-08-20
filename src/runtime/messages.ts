@@ -9,6 +9,19 @@ interface AuthenticationInfo {
 	remotePublicKey: Uint8Array;
 }
 
+export interface GeneratedKeypair {
+	privateKey: string;
+	publicKey: string;
+}
+
+export function parseGeneratedKeypair(json: string): GeneratedKeypair {
+	const value = parseObject(json, "generate_keypair result");
+	return {
+		privateKey: readString(value.private_key_base64, "private_key_base64"),
+		publicKey: readString(value.public_key_base64, "public_key_base64"),
+	};
+}
+
 export function parseHandshakeInfo(json: string): HandshakeInfo {
 	const value = parseObject(json, "NoiseHandshakeMsg1 result");
 	readString(value.client_encryption_algorithm, "client_encryption_algorithm");

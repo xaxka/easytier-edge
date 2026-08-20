@@ -27,8 +27,9 @@ Packets addressed to the relay are authenticated, decrypted, and processed by th
 
 ## Properties
 
-- Multiple isolated EasyTier networks behind one `wss://` endpoint
+- One private EasyTier network behind a `wss://` endpoint (private-mode semantics enforced: only peers with the same network identity are admitted)
 - Noise XX authentication with network-secret proof
+- Optional server keys: an ephemeral X25519 identity is generated at startup when none is configured (the official secure-mode "same trust domain" scenario)
 - AES-GCM and ChaCha20-Poly1305 authenticated encryption
 - OSPF route synchronization and PeerCenter discovery
 - Client-to-client UDP/TCP hole-punch coordination through forwarded EasyTier RPC
@@ -36,23 +37,18 @@ Packets addressed to the relay are authenticated, decrypted, and processed by th
 - Periodic OSPF session maintenance and route-version refresh
 - Bounded RPC fragmentation, transaction tracking, and anti-replay state
 - Frame, hop, and outbound-capacity limits on the relay path
-- No legacy plaintext mode and no cross-network state
+- No legacy plaintext mode
 
 ## Deploy
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/xixka/easytier-edge)
 
-The deployment requires three secrets:
+The deployment requires two secrets:
 
-- `EASYTIER_NETWORKS`
-- `LOCAL_PRIVATE_KEY`
-- `LOCAL_PUBLIC_KEY`
+- `NETWORK_NAME`
+- `NETWORK_SECRET`
 
-Generate the X25519 server identity before deployment:
-
-```bash
-pnpm run keys
-```
+The server X25519 keypair (`LOCAL_PRIVATE_KEY` / `LOCAL_PUBLIC_KEY`) is optional: without it an ephemeral identity is generated on each startup and peers need no keys at all. Run `pnpm run keys` only if you want a pinned identity that clients can lock onto via `peer_public_key`.
 
 ## Local development
 
@@ -72,9 +68,8 @@ pnpm run dev
 Configure `.dev.vars`:
 
 ```dotenv
-EASYTIER_NETWORKS=[{"network_name":"office","network_secret":"replace-with-a-random-secret"}]
-LOCAL_PRIVATE_KEY=<base64-encoded-32-byte-private-key>
-LOCAL_PUBLIC_KEY=<base64-encoded-32-byte-public-key>
+NETWORK_NAME=office
+NETWORK_SECRET=replace-with-a-random-secret
 EASYTIER_HOSTNAME=edge
 ```
 
@@ -82,35 +77,34 @@ EASYTIER_HOSTNAME=edge
 
 | Variable | Required | Contract |
 | --- | --- | --- |
-| `EASYTIER_NETWORKS` | Yes | Non-empty JSON array containing unique `network_name` and non-empty `network_secret` values. |
-| `LOCAL_PRIVATE_KEY` | Yes | Base64-encoded 32-byte X25519 private key. |
-| `LOCAL_PUBLIC_KEY` | Yes | Matching Base64-encoded 32-byte X25519 public key. |
+| `NETWORK_NAME` | Yes | Network name; non-empty, at most 255 UTF-8 bytes. |
+| `NETWORK_SECRET` | Yes | Network secret; non-empty. Must match on every peer. |
+| `LOCAL_PRIVATE_KEY` | No | Base64-encoded 32-byte X25519 private key. An ephemeral key is generated when omitted. |
+| `LOCAL_PUBLIC_KEY` | No | Matching Base64-encoded 32-byte X25519 public key. Must be set together with the private key. |
 | `EASYTIER_HOSTNAME` | No | Advertised hostname; defaults to `edge`, maximum 255 UTF-8 bytes. |
 | `MAX_FRAME_BYTES` | No | Frame limit; defaults to 1 MiB, allowed range 1 KiB–16 MiB. |
 
 Set production credentials through Wrangler:
 
 ```bash
-pnpm exec wrangler secret put EASYTIER_NETWORKS
-pnpm exec wrangler secret put LOCAL_PRIVATE_KEY
-pnpm exec wrangler secret put LOCAL_PUBLIC_KEY
+pnpm exec wrangler secret put NETWORK_NAME
+pnpm exec wrangler secret put NETWORK_SECRET
 ```
 
 ## Connect a peer
+
+Peers need no keys; `--secure-mode` generates an ephemeral X25519 identity automatically:
 
 ```bash
 easytier-core \
   --network-name office \
   --network-secret 'replace-with-a-random-secret' \
   --secure-mode \
-  --local-private-key '<client-private-key>' \
-  --local-public-key '<client-public-key>' \
+  --private-mode \
   -p 'wss://<worker-domain>/'
 ```
 
-Peers sharing a network must use the same network credentials. Networks configured on the same Worker do not share routing, discovery, RPC, or forwarding state.
-
-Only peers that complete `NetworkSecretConfirmed` authentication are admitted. Legacy plaintext and credential-only admission are intentionally rejected by this deployment model.
+The relay enforces private-mode semantics: only peers whose `network_name` and `network_secret` both match and that complete `NetworkSecretConfirmed` authentication are admitted; any other network identity is rejected. Legacy plaintext and credential-only admission are intentionally rejected by this deployment model.
 
 ## Toolchain
 

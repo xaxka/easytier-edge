@@ -1,5 +1,3 @@
-import { SecurePeer } from "./wasm";
-import { SERVER_PEER_ID } from "./core/constants";
 import { type EasyTierEnv, readServerConfig } from "./core/config";
 import { errorMessage } from "./runtime/errors";
 
@@ -13,14 +11,8 @@ export default {
 		if (url.pathname === "/healthz" && request.method === "GET") {
 			try {
 				const config = readServerConfig(env);
-				const validator = new SecurePeer(
-					config.localPrivateKey,
-					config.localPublicKey,
-					SERVER_PEER_ID,
-				);
-				validator.free();
 				return Response.json(
-					{ ok: true, secure_mode: true, networks: config.rooms.size },
+					{ ok: true, secure_mode: true, network: config.networkName },
 					{ headers: { "cache-control": "no-store" } },
 				);
 			} catch (error) {

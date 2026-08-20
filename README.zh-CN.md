@@ -27,8 +27,9 @@ Durable Object
 
 ## 特性
 
-- 单个 `wss://` 入口承载多个相互隔离的 EasyTier 网络
+- 单个 `wss://` 入口承载一个私有 EasyTier 网络(强制 private-mode 语义:仅接受相同网络身份的节点)
 - Noise XX 握手与网络密码证明
+- 服务端密钥可选:未配置时自动生成临时 X25519 身份(对应官方 secure mode "同一信任域"场景)
 - AES-GCM、ChaCha20-Poly1305 认证加密
 - OSPF 路由同步与 PeerCenter 节点发现
 - 通过转发 EasyTier RPC 协调客户端之间的 UDP/TCP 打洞
@@ -36,23 +37,18 @@ Durable Object
 - 周期维护 OSPF session 并刷新路由版本
 - 有界 RPC 分片、事务跟踪和防重放状态
 - 中继链路具备帧大小、跳数和发送容量限制
-- 不支持旧版明文模式，不共享跨网络状态
+- 不支持旧版明文模式
 
 ## 部署
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/xixka/easytier-edge)
 
-部署需要配置三个 Secret：
+部署需要配置两个 Secret:
 
-- `EASYTIER_NETWORKS`
-- `LOCAL_PRIVATE_KEY`
-- `LOCAL_PUBLIC_KEY`
+- `NETWORK_NAME`
+- `NETWORK_SECRET`
 
-部署前生成 X25519 服务端身份：
-
-```bash
-pnpm run keys
-```
+服务端 X25519 密钥对(`LOCAL_PRIVATE_KEY` / `LOCAL_PUBLIC_KEY`)是可选的:不配置时每次启动自动生成临时身份,节点接入无需任何密钥。若希望通过 `peer_public_key` 锁定服务端身份,可运行 `pnpm run keys` 生成并配置固定密钥。
 
 ## 本地开发
 
@@ -72,9 +68,8 @@ pnpm run dev
 配置 `.dev.vars`：
 
 ```dotenv
-EASYTIER_NETWORKS=[{"network_name":"office","network_secret":"replace-with-a-random-secret"}]
-LOCAL_PRIVATE_KEY=<base64-encoded-32-byte-private-key>
-LOCAL_PUBLIC_KEY=<base64-encoded-32-byte-public-key>
+NETWORK_NAME=office
+NETWORK_SECRET=replace-with-a-random-secret
 EASYTIER_HOSTNAME=edge
 ```
 
@@ -82,35 +77,34 @@ EASYTIER_HOSTNAME=edge
 
 | 变量 | 必填 | 约束 |
 | --- | --- | --- |
-| `EASYTIER_NETWORKS` | 是 | 非空 JSON 数组，每项包含唯一的 `network_name` 和非空 `network_secret`。 |
-| `LOCAL_PRIVATE_KEY` | 是 | Base64 编码的 32 字节 X25519 私钥。 |
-| `LOCAL_PUBLIC_KEY` | 是 | 与私钥匹配的 Base64 编码 32 字节 X25519 公钥。 |
+| `NETWORK_NAME` | 是 | 网络名称，非空且不超过 255 个 UTF-8 字节。 |
+| `NETWORK_SECRET` | 是 | 网络密码，非空。所有节点必须一致。 |
+| `LOCAL_PRIVATE_KEY` | 否 | Base64 编码的 32 字节 X25519 私钥。未配置时自动生成临时密钥。 |
+| `LOCAL_PUBLIC_KEY` | 否 | 与私钥匹配的 Base64 编码 32 字节 X25519 公钥。与私钥必须成对配置。 |
 | `EASYTIER_HOSTNAME` | 否 | 对外发布的 hostname，默认 `edge`，最大 255 个 UTF-8 字节。 |
 | `MAX_FRAME_BYTES` | 否 | 单帧上限，默认 1 MiB，允许范围为 1 KiB–16 MiB。 |
 
 通过 Wrangler 写入生产凭据：
 
 ```bash
-pnpm exec wrangler secret put EASYTIER_NETWORKS
-pnpm exec wrangler secret put LOCAL_PRIVATE_KEY
-pnpm exec wrangler secret put LOCAL_PUBLIC_KEY
+pnpm exec wrangler secret put NETWORK_NAME
+pnpm exec wrangler secret put NETWORK_SECRET
 ```
 
 ## 节点接入
+
+节点无需配置任何密钥，`--secure-mode` 会自动生成临时 X25519 身份：
 
 ```bash
 easytier-core \
   --network-name office \
   --network-secret 'replace-with-a-random-secret' \
   --secure-mode \
-  --local-private-key '<client-private-key>' \
-  --local-public-key '<client-public-key>' \
+  --private-mode \
   -p 'wss://<worker-domain>/'
 ```
 
-同一网络内的节点必须使用相同凭据。同一 Worker 上配置的不同网络不会共享路由、发现、RPC 或转发状态。
-
-只有完成 `NetworkSecretConfirmed` 认证的节点才能接入。该部署模型会明确拒绝旧版明文模式和仅凭 credential 接入的节点。
+服务端强制 private-mode 语义：只有 `network_name` 与 `network_secret` 均匹配且完成 `NetworkSecretConfirmed` 认证的节点才能接入，其他网络身份一律拒绝。该部署模型会明确拒绝旧版明文模式和仅凭 credential 接入的节点。
 
 ## 工具链
 
