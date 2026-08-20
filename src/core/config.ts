@@ -12,6 +12,7 @@ export interface ServerConfig {
 	localPublicKeyBytes?: Uint8Array;
 	disableRelayData: boolean;
 	maxFrameBytes: number;
+	maxPendingPerIp: number;
 }
 
 export interface EasyTierEnv {
@@ -23,9 +24,11 @@ export interface EasyTierEnv {
 	DISABLE_RELAY_DATA?: string;
 	EASYTIER_HOSTNAME?: string;
 	MAX_FRAME_BYTES?: string;
+	MAX_PENDING_PER_IP?: string;
 }
 
 const UTF8_ENCODER = new TextEncoder();
+const DEFAULT_MAX_PENDING_PER_IP = 17;
 
 export function readServerConfig(env: EasyTierEnv): ServerConfig {
 	const networkName = requireText(env.NETWORK_NAME, "NETWORK_NAME");
@@ -56,6 +59,13 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 	if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes < 1024 || maxFrameBytes > 16_777_216) {
 		throw new Error("MAX_FRAME_BYTES must be an integer between 1024 and 16777216");
 	}
+	// 同一出口 IP 并发未认证(Noise 握手未完成)连接的上限,
+	// 只作用于握手前,不影响完成认证后的长期连接。
+	const maxPendingPerIp = parsePositiveInt(
+		env.MAX_PENDING_PER_IP,
+		"MAX_PENDING_PER_IP",
+		DEFAULT_MAX_PENDING_PER_IP,
+	);
 	// DISABLE_RELAY_DATA=true 时只保留控制面(信令),丢弃节点间数据面转发,
 	// 与上游 EasyTier 的 disable_relay_data / avoid_relay_data 语义一致。
 	const disableRelayData = parseBoolean(env.DISABLE_RELAY_DATA, "DISABLE_RELAY_DATA");
@@ -76,6 +86,7 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 			hostname,
 			disableRelayData,
 			maxFrameBytes,
+			maxPendingPerIp,
 		};
 	}
 
@@ -94,7 +105,21 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 		localPublicKeyBytes: publicBytes,
 		disableRelayData,
 		maxFrameBytes,
+		maxPendingPerIp,
 	};
+}
+
+function parsePositiveInt(
+	value: string | undefined,
+	name: string,
+	fallback: number,
+): number {
+	if (value === undefined || value === "") return fallback;
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 2_048) {
+		throw new Error(`${name} must be an integer between 1 and 2048`);
+	}
+	return parsed;
 }
 
 function parseBoolean(value: string | undefined, name: string): boolean {

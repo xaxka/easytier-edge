@@ -62,6 +62,25 @@ describe("readServerConfig", () => {
 		);
 	});
 
+	it("defaults MAX_PENDING_PER_IP to 17 and accepts overrides", () => {
+		expect(readServerConfig(env()).maxPendingPerIp).toBe(17);
+		expect(readServerConfig(env({ MAX_PENDING_PER_IP: "" })).maxPendingPerIp).toBe(17);
+		expect(readServerConfig(env({ MAX_PENDING_PER_IP: "4" })).maxPendingPerIp).toBe(4);
+		expect(readServerConfig(env({ MAX_PENDING_PER_IP: "2048" })).maxPendingPerIp).toBe(2048);
+		expect(() => readServerConfig(env({ MAX_PENDING_PER_IP: "0" }))).toThrow(
+			/MAX_PENDING_PER_IP/,
+		);
+		expect(() => readServerConfig(env({ MAX_PENDING_PER_IP: "-1" }))).toThrow(
+			/MAX_PENDING_PER_IP/,
+		);
+		expect(() => readServerConfig(env({ MAX_PENDING_PER_IP: "2.5" }))).toThrow(
+			/MAX_PENDING_PER_IP/,
+		);
+		expect(() => readServerConfig(env({ MAX_PENDING_PER_IP: "2049" }))).toThrow(
+			/MAX_PENDING_PER_IP/,
+		);
+	});
+
 	it("parses DISABLE_RELAY_DATA as an optional boolean", () => {
 		expect(readServerConfig(env()).disableRelayData).toBe(false);
 		expect(readServerConfig(env({ DISABLE_RELAY_DATA: "true" })).disableRelayData).toBe(true);

@@ -21,7 +21,8 @@
 	"vars": {
 		"EASYTIER_HOSTNAME": "edge",
 		"DISABLE_RELAY_DATA": "true",
-		"MAX_FRAME_BYTES": "1048576"
+		"MAX_FRAME_BYTES": "1048576",
+		"MAX_PENDING_PER_IP": "17"
 	},
 	"placement": {
 		"mode": "smart"

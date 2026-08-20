@@ -28,9 +28,9 @@ const MAX_CONNECTIONS = 2_048;
 /**
  * 未完成 Noise 握手的连接配额:防止攻击者用大量裸 socket 占满
  * 2048 个连接槽,把真实节点挤成 503。握手超时(10s)保证配额会自动释放。
+ * 单 IP 上限可通过 MAX_PENDING_PER_IP 配置(默认 17)。
  */
 const MAX_PENDING_HANDSHAKES = 256;
-const MAX_PENDING_HANDSHAKES_PER_IP = 8;
 const UNKNOWN_IP = "unknown";
 
 export class EasyTierServer extends DurableObject<EasyTierEnv> {
@@ -79,7 +79,7 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		if (
 			this.connections.size >= MAX_CONNECTIONS ||
 			this.pendingHandshakes >= MAX_PENDING_HANDSHAKES ||
-			(this.pendingHandshakesByIp.get(ipKey) ?? 0) >= MAX_PENDING_HANDSHAKES_PER_IP
+			(this.pendingHandshakesByIp.get(ipKey) ?? 0) >= this.config.maxPendingPerIp
 		) {
 			return new Response("EasyTier connection capacity exceeded", { status: 503 });
 		}

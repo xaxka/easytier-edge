@@ -85,6 +85,7 @@ EASYTIER_HOSTNAME=edge
 | `EASYTIER_HOSTNAME` | No | Advertised hostname; defaults to `edge`, maximum 255 UTF-8 bytes. |
 | `DISABLE_RELAY_DATA` | No | Defaults to `false`. When `true`, only the control plane (route sync, discovery, hole-punch coordination, ping/pong) is forwarded; peer data-plane forwarding is dropped and `avoid_relay_data` is advertised in route info. |
 | `MAX_FRAME_BYTES` | No | Frame limit; defaults to 1 MiB, allowed range 1 KiB–16 MiB. |
+| `MAX_PENDING_PER_IP` | No | Per-IP cap on concurrent connections that have not finished the Noise handshake; defaults to `17`, allowed range 1–2048. Only throttles handshakes, never authenticated peers behind shared NAT. |
 
 Set production credentials through Wrangler:
 
