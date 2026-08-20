@@ -20,6 +20,7 @@
 	},
 	"vars": {
 		"EASYTIER_HOSTNAME": "edge",
+		"DISABLE_RELAY_DATA": "false",
 		"MAX_FRAME_BYTES": "1048576"
 	},
 	"placement": {
