@@ -100,7 +100,7 @@ easytier-core \
   --network-name office \
   --network-secret 'replace-with-a-random-secret' \
   --secure-mode \
-  --private-mode \
+  --private-mode true \
   -p 'wss://<worker-domain>/'
 ```
 
