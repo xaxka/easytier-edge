@@ -37,6 +37,9 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install 1.95.0 --profile minimal --target wasm32-unknown-unknown
 
+      - name: Test Rust core
+        run: cargo test --manifest-path wasm/Cargo.toml
+
       - name: Build WebAssembly core
         run: pnpm run build:wasm
 

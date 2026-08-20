@@ -23,6 +23,6 @@
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.10",
 		"wasm-pack": "^0.15.0",
-		"wrangler": "^4.112.0"
+		"wrangler": "^4.124.0"
 	}
 }
