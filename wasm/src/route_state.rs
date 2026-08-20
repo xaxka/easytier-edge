@@ -13,6 +13,34 @@ pub type PeerId = u32;
 pub type Version = u32;
 pub type SessionId = u64;
 
+/// 校验路由信息中上报的 Noise 公钥,必要时完成首次绑定。
+///
+/// - secure 握手节点:绑定的 32 字节公钥必须与上报值逐字节一致。
+/// - legacy 握手节点:握手时无法获得公钥,绑定为空键。上游客户端
+///   即使未启用加密也总会生成 X25519 密钥对并在 `RoutePeerInfo` 中
+///   上报真实公钥,因此空键在首次路由同步时绑定上报值,后续必须一致,
+///   防止同一连接内身份漂移。
+fn validate_or_bind_reported_key(
+    authenticated: &mut Vec<u8>,
+    reported: &[u8],
+) -> Result<(), String> {
+    if !reported.is_empty() && reported.len() != 32 {
+        return Err("RoutePeerInfo public key must be empty or 32 bytes".to_string());
+    }
+    if authenticated.is_empty() {
+        if !reported.is_empty() {
+            authenticated.extend_from_slice(reported);
+        }
+        return Ok(());
+    }
+    if reported != authenticated.as_slice() {
+        return Err(
+            "RoutePeerInfo public key does not match the authenticated Noise identity".to_string(),
+        );
+    }
+    Ok(())
+}
+
 pub(crate) struct RouteSyncOutcome {
     pub(crate) response: Vec<u8>,
     pub(crate) route_changed: bool,
@@ -460,15 +488,15 @@ impl RouteState {
                 }
                 let authenticated_key =
                     g.authenticated_peer_keys
-                        .get(&from_peer_id)
+                        .get_mut(&from_peer_id)
                         .ok_or_else(|| {
                             JsValue::from_str("route peer has no authenticated public key")
                         })?;
-                if info.noise_static_pubkey.as_slice() != authenticated_key.as_slice() {
-                    return Err(JsValue::from_str(
-                        "RoutePeerInfo public key does not match the authenticated Noise identity",
-                    ));
-                }
+                validate_or_bind_reported_key(
+                    authenticated_key,
+                    &info.noise_static_pubkey,
+                )
+                .map_err(|e| JsValue::from_str(&e))?;
                 let is_new = !g.peer_infos.contains_key(&info.peer_id);
                 let instance_changed = g
                     .peer_infos
@@ -646,5 +674,52 @@ impl RouteState {
         };
         g.cached_conn_bitmap = Some((topology_version, result.clone()));
         Ok(Some(ConnInfo::ConnBitmap(result)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_or_bind_reported_key;
+
+    const KEY_A: [u8; 32] = [0x11; 32];
+    const KEY_B: [u8; 32] = [0x22; 32];
+
+    #[test]
+    fn secure_peer_requires_exact_key_match() {
+        let mut bound = KEY_A.to_vec();
+        assert!(validate_or_bind_reported_key(&mut bound, &KEY_A).is_ok());
+        assert!(validate_or_bind_reported_key(&mut bound, &KEY_B).is_err());
+        // secure 节点上报空键视为不匹配。
+        assert!(validate_or_bind_reported_key(&mut bound, &[]).is_err());
+        assert_eq!(bound, KEY_A.to_vec());
+    }
+
+    #[test]
+    fn legacy_peer_binds_reported_key_on_first_sync() {
+        // legacy 握手绑定为空键;上游客户端即使未启用加密也会在
+        // RoutePeerInfo 中上报真实 X25519 公钥,首次同步必须放行并绑定。
+        let mut bound = Vec::new();
+        assert!(validate_or_bind_reported_key(&mut bound, &KEY_A).is_ok());
+        assert_eq!(bound, KEY_A.to_vec());
+        // 绑定后同一连接内换公钥被拒绝。
+        assert!(validate_or_bind_reported_key(&mut bound, &KEY_B).is_err());
+        // 重复上报同一公钥保持通过。
+        assert!(validate_or_bind_reported_key(&mut bound, &KEY_A).is_ok());
+    }
+
+    #[test]
+    fn legacy_peer_may_stay_keyless() {
+        // 极老客户端可能不上报公钥,保持空绑定时空对空放行。
+        let mut bound = Vec::new();
+        assert!(validate_or_bind_reported_key(&mut bound, &[]).is_ok());
+        assert!(bound.is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_key_lengths() {
+        let mut empty = Vec::new();
+        assert!(validate_or_bind_reported_key(&mut empty, &[1u8; 16]).is_err());
+        let mut bound = KEY_A.to_vec();
+        assert!(validate_or_bind_reported_key(&mut bound, &[1u8; 33]).is_err());
     }
 }
