@@ -178,5 +178,7 @@ export class EasyTierRpc {
 }
 
 function routeSyncKey(peer: RpcPeer): string {
-	return JSON.stringify([peer.networkName, peer.peerId]);
+	// peerId 恒为数字,不含 ':',因此 name:id 拼接无歧义,
+	// 且比 JSON.stringify([name, id]) 少两次对象/数组分配。
+	return `${peer.networkName}:${peer.peerId}`;
 }

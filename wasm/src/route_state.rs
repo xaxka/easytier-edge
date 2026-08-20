@@ -80,6 +80,13 @@ impl RouteState {
     }
 
     fn random_u32() -> u32 {
+        // 会话 ID / UUID / 拓扑版本使用 CSPRNG:经 getrandom 0.3 的 wasm_js
+        // 特性在 Worker 中映射到 crypto.getRandomValues,宿主机测试用系统熵。
+        let mut bytes = [0u8; 4];
+        if getrandom::fill(&mut bytes).is_ok() {
+            return u32::from_le_bytes(bytes);
+        }
+        // 理论上不可达的兜底路径:Workers 运行时始终暴露 crypto.getRandomValues。
         (js_sys::Math::random() * (u32::MAX as f64)) as u32
     }
 
