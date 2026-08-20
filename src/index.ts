@@ -10,13 +10,9 @@ export default {
 		const url = new URL(request.url);
 		if (url.pathname === "/healthz" && request.method === "GET") {
 			try {
-				const config = readServerConfig(env);
+				readServerConfig(env);
 				return Response.json(
-					{
-						ok: true,
-						secure_mode: true,
-						disable_relay_data: config.disableRelayData,
-					},
+					{ ok: true },
 					{ headers: { "cache-control": "no-store" } },
 				);
 			} catch (error) {
