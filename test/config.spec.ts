@@ -90,4 +90,21 @@ describe("readServerConfig", () => {
 			/DISABLE_RELAY_DATA/,
 		);
 	});
+
+	it("defaults CONNECTION_MODE to secure", () => {
+		expect(readServerConfig(env()).connectionMode).toBe("secure");
+		expect(readServerConfig(env({ CONNECTION_MODE: "" })).connectionMode).toBe("secure");
+		expect(readServerConfig(env({ CONNECTION_MODE: undefined })).connectionMode).toBe("secure");
+	});
+
+	it("accepts legacy and auto connection modes case-insensitively", () => {
+		expect(readServerConfig(env({ CONNECTION_MODE: "legacy" })).connectionMode).toBe("legacy");
+		expect(readServerConfig(env({ CONNECTION_MODE: "AUTO" })).connectionMode).toBe("auto");
+		expect(readServerConfig(env({ CONNECTION_MODE: " Secure " })).connectionMode).toBe("secure");
+	});
+
+	it("rejects unknown CONNECTION_MODE values", () => {
+		expect(() => readServerConfig(env({ CONNECTION_MODE: "both" }))).toThrow(/CONNECTION_MODE/);
+		expect(() => readServerConfig(env({ CONNECTION_MODE: "0" }))).toThrow(/CONNECTION_MODE/);
+	});
 });

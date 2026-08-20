@@ -49,6 +49,11 @@ export class WasmRpcCore {
     set_avoid_relay_data(enabled: boolean): void;
 }
 
+/**
+ * 构造服务端 legacy 握手响应帧并回给客户端。
+ */
+export function build_legacy_handshake_response(server_peer_id: number, network_name: string, network_secret: string): Uint8Array;
+
 export function build_packet(from_peer_id: number, to_peer_id: number, packet_type: number, payload: Uint8Array): Uint8Array;
 
 /**
@@ -63,9 +68,26 @@ export function inspect_packet(bytes: Uint8Array): Uint32Array;
 
 export function is_relay_data_packet(bytes: Uint8Array): boolean;
 
+/**
+ * 计算网络身份摘要(与上游 `generate_digest_from_str` 一致)。
+ */
+export function network_secret_digest(network_name: string, network_secret: string): Uint8Array;
+
+/**
+ * 解析客户端发来的 legacy 握手帧,返回
+ * `{ peer_id, network_name, network_secret_digest_base64 }`。
+ * 房间白名单与摘要匹配由 TypeScript 层结合配置完成。
+ */
+export function parse_legacy_handshake(packet: Uint8Array): string;
+
 export function prepare_forward(bytes: Uint8Array): Uint8Array;
 
 export function prepare_pong(bytes: Uint8Array): Uint8Array;
+
+/**
+ * 常数时间校验客户端摘要是否等于 `(network_name, network_secret)` 的摘要。
+ */
+export function verify_network_secret_digest(digest: Uint8Array, network_name: string, network_secret: string): boolean;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
@@ -73,10 +95,13 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_securepeer_free: (a: number, b: number) => void;
     readonly __wbg_wasmrpccore_free: (a: number, b: number) => void;
+    readonly build_legacy_handshake_response: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly build_packet: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly generate_keypair: (a: number) => void;
     readonly inspect_packet: (a: number, b: number, c: number) => void;
     readonly is_relay_data_packet: (a: number, b: number, c: number) => void;
+    readonly network_secret_digest: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly parse_legacy_handshake: (a: number, b: number, c: number) => void;
     readonly prepare_forward: (a: number, b: number, c: number) => void;
     readonly prepare_pong: (a: number, b: number, c: number) => void;
     readonly securepeer_build_msg2: (a: number, b: number, c: number, d: number) => void;
@@ -86,6 +111,7 @@ export interface InitOutput {
     readonly securepeer_is_authenticated: (a: number) => number;
     readonly securepeer_new: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly securepeer_read_msg1: (a: number, b: number, c: number, d: number) => void;
+    readonly verify_network_secret_digest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly wasmrpccore_add_peer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly wasmrpccore_build_route_update: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number, h: bigint) => void;
     readonly wasmrpccore_clean_expired: (a: number, b: bigint) => void;
@@ -97,8 +123,8 @@ export interface InitOutput {
     readonly __wbindgen_export: (a: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
     readonly __wbindgen_export2: (a: number, b: number) => number;
-    readonly __wbindgen_export3: (a: number, b: number, c: number) => void;
-    readonly __wbindgen_export4: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_export3: (a: number, b: number, c: number, d: number) => number;
+    readonly __wbindgen_export4: (a: number, b: number, c: number) => void;
 }
 
 export type SyncInitInput = BufferSource | WebAssembly.Module;

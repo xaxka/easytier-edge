@@ -23,7 +23,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .protoc_arg("--experimental_allow_proto3_optional")
         .type_attribute(".common", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute(".error", "#[derive(serde::Serialize, serde::Deserialize)]")
-        .type_attribute(".peer_rpc", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute(
+            ".peer_rpc",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
         .type_attribute("peer_rpc.DirectConnectedPeerInfo", "#[derive(Hash)]")
         .type_attribute("peer_rpc.PeerInfoForGlobalMap", "#[derive(Hash)]")
         .type_attribute("peer_rpc.ForeignNetworkRouteInfoKey", "#[derive(Hash, Eq)]")

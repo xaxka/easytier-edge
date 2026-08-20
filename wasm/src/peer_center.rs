@@ -44,9 +44,7 @@ impl PeerCenter {
     }
 
     fn group_mut(&mut self, group_key: &str) -> &mut PeerCenterGroupData {
-        self.groups
-            .entry(group_key.to_string())
-            .or_default()
+        self.groups.entry(group_key.to_string()).or_default()
     }
 
     fn calc_digest_internal(data: &PeerCenterGroupData) -> Digest {
@@ -127,10 +125,9 @@ impl PeerCenter {
         group_key: &str,
         request_bytes: &[u8],
     ) -> Result<Vec<u8>, JsValue> {
-        let req = GetGlobalPeerMapRequest::decode(request_bytes)
-            .map_err(|e| {
-                JsValue::from_str(&format!("decode GetGlobalPeerMapRequest failed: {}", e))
-            })?;
+        let req = GetGlobalPeerMapRequest::decode(request_bytes).map_err(|e| {
+            JsValue::from_str(&format!("decode GetGlobalPeerMapRequest failed: {}", e))
+        })?;
 
         let data = self.group_mut(group_key);
         let digest = req.digest;
@@ -138,10 +135,9 @@ impl PeerCenter {
         if digest == data.digest && digest != 0 {
             let resp = GetGlobalPeerMapResponse::default();
             let mut buf = Vec::new();
-            prost::Message::encode(&resp, &mut buf)
-                .map_err(|e| {
-                    JsValue::from_str(&format!("encode GetGlobalPeerMapResponse failed: {}", e))
-                })?;
+            prost::Message::encode(&resp, &mut buf).map_err(|e| {
+                JsValue::from_str(&format!("encode GetGlobalPeerMapResponse failed: {}", e))
+            })?;
             return Ok(buf);
         }
 
@@ -161,10 +157,9 @@ impl PeerCenter {
             digest: Some(data.digest),
         };
         let mut buf = Vec::new();
-        prost::Message::encode(&resp, &mut buf)
-            .map_err(|e| {
-                JsValue::from_str(&format!("encode GetGlobalPeerMapResponse failed: {}", e))
-            })?;
+        prost::Message::encode(&resp, &mut buf).map_err(|e| {
+            JsValue::from_str(&format!("encode GetGlobalPeerMapResponse failed: {}", e))
+        })?;
         Ok(buf)
     }
 

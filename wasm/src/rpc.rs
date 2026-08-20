@@ -116,8 +116,7 @@ impl WasmRpcCore {
         peer_id: u32,
         remote_public_key: &[u8],
     ) -> Result<(), JsValue> {
-        self.routes
-            .add_peer(network, peer_id, remote_public_key)?;
+        self.routes.add_peer(network, peer_id, remote_public_key)?;
         if self.configured_groups.insert(network.to_string()) {
             self.routes
                 .set_my_info_field(network, "hostname", &self.hostname)?;

@@ -1,5 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
-import { SecurePeer, generate_keypair } from "./wasm";
+import {
+	SecurePeer,
+	build_legacy_handshake_response,
+	generate_keypair,
+	parse_legacy_handshake,
+	verify_network_secret_digest,
+} from "./wasm";
 import { ENCRYPTED_FLAG, PacketType, SERVER_PEER_ID } from "./core/constants";
 import { type EasyTierEnv, type ServerConfig, readServerConfig } from "./core/config";
 import {
@@ -21,6 +27,7 @@ import {
 	parseAuthenticationInfo,
 	parseGeneratedKeypair,
 	parseHandshakeInfo,
+	parseLegacyHandshakeInfo,
 } from "./runtime/messages";
 import { RoomRegistry } from "./runtime/rooms";
 
@@ -132,6 +139,12 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		const packet = parsePacket(frame);
 		switch (connection.phase) {
 			case "msg1":
+				// 首包类型决定握手方式:HandShake(2) 走旧版明文握手,
+				// NoiseHandshakeMsg1(13) 走 Noise XX 安全握手。
+				if (packet.header.packetType === PacketType.Handshake) {
+					this.handleLegacyHandshake(connection, frame, packet.header);
+					return;
+				}
 				this.handleHandshakeMessage1(connection, frame, packet.header.packetType);
 				return;
 			case "msg3":
@@ -151,7 +164,10 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		packetType: number,
 	): void {
 		if (packetType !== PacketType.NoiseHandshakeMsg1) {
-			throw new Error("secure_mode rejects legacy or out-of-order handshakes");
+			throw new Error("unexpected or out-of-order handshake packet");
+		}
+		if (this.config.connectionMode === "legacy") {
+			throw new Error("CONNECTION_MODE=legacy rejects secure-mode handshakes");
 		}
 		const info = parseHandshakeInfo(connection.secure.read_msg1(frame));
 		const room = this.config.rooms.get(info.networkName);
@@ -163,6 +179,53 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		connection.networkName = info.networkName;
 		connection.send(connection.secure.build_msg2(room.network_secret));
 		connection.phase = "msg3";
+	}
+
+	/**
+	 * 旧版(非安全模式)握手:对应上游 EasyTier 的 `PacketType::HandShake`。
+	 * 客户端发送明文 `HandshakeRequest`(含 network_name 与 network_secret
+	 * 摘要),服务端校验房间与摘要后回发自身的 `HandshakeRequest`。
+	 * 该路径面向无法配置 secure mode 的客户端,由 CONNECTION_MODE 启用。
+	 */
+	private handleLegacyHandshake(
+		connection: Connection,
+		frame: Uint8Array,
+		header: ReturnType<typeof parsePacket>["header"],
+	): void {
+		if (this.config.connectionMode === "secure") {
+			throw new Error("CONNECTION_MODE=secure rejects legacy plaintext handshakes");
+		}
+		if (header.fromPeerId === SERVER_PEER_ID) {
+			throw new Error("legacy handshake peer id conflicts with the relay peer id");
+		}
+		const info = parseLegacyHandshakeInfo(parse_legacy_handshake(frame));
+		const room = this.config.rooms.get(info.networkName);
+		if (room === undefined) {
+			this.close(connection, 4403, "network is not configured");
+			return;
+		}
+		const digestOk = verify_network_secret_digest(
+			info.networkSecretDigest,
+			info.networkName,
+			room.network_secret,
+		);
+		if (!digestOk) {
+			throw new Error("legacy handshake network-secret digest mismatch");
+		}
+		connection.peerId = info.peerId;
+		connection.networkName = info.networkName;
+		connection.mode = "legacy";
+		connection.send(
+			build_legacy_handshake_response(
+				SERVER_PEER_ID,
+				info.networkName,
+				room.network_secret,
+			),
+		);
+		this.registerConnection(connection);
+		completeHandshake(connection);
+		this.releaseHandshakeSlot(connection);
+		this.broadcastRouteUpdate(connection.networkName);
 	}
 
 	private handleHandshakeMessage3(
@@ -242,13 +305,22 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			// 本节点没有本地 TUN；数据包和端到端中继握手只有发往其他节点时才有意义。
 			return;
 		}
-		if ((header.flags & ENCRYPTED_FLAG) === 0) {
-			throw new Error("secure_mode requires encrypted direct RPC packets");
+		const encrypted = (header.flags & ENCRYPTED_FLAG) !== 0;
+		let clearPacket: ReturnType<typeof parsePacket>;
+		if (connection.mode === "legacy") {
+			// legacy 连接没有会话密钥:直达 RPC 必须保持明文。
+			if (encrypted) {
+				throw new Error("legacy connections must not send encrypted direct RPC packets");
+			}
+			clearPacket = packet;
+		} else {
+			if (!encrypted) {
+				throw new Error("secure_mode requires encrypted direct RPC packets");
+			}
+			const clear = connection.secure.decrypt_packet(frame);
+			if (clear.byteLength === 0) return;
+			clearPacket = parsePacket(clear);
 		}
-
-		const clear = connection.secure.decrypt_packet(frame);
-		if (clear.byteLength === 0) return;
-		const clearPacket = parsePacket(clear);
 		if (header.packetType === PacketType.RpcReq) {
 			const result = this.rpc.handleRequest(connection, clearPacket.payload);
 			if (result === "route") this.broadcastRouteUpdate(connection.networkName, connection.peerId);

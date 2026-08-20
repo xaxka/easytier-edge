@@ -38,7 +38,7 @@ Durable Object
 - 有界 RPC 分片、事务跟踪和防重放状态
 - 中继链路具备帧大小、跳数和发送容量限制
 - 可选 `DISABLE_RELAY_DATA=true`:仅保留控制面(信令),丢弃节点间数据面转发,并通过 `avoid_relay_data` 特性标志告知节点(对齐上游 EasyTier 的 `disable_relay_data`)
-- 不支持旧版明文模式
+- 通过 `CONNECTION_MODE` 切换握手方式:`secure`(默认,仅 Noise XX 安全握手)、`legacy`(EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端)或 `auto`(按首包类型自动二选一)
 
 ## 部署
 
@@ -85,6 +85,8 @@ EASYTIER_HOSTNAME=edge
 | `EASYTIER_HOSTNAME` | 否 | 对外发布的 hostname，默认 `edge`，最大 255 个 UTF-8 字节。 |
 | `DISABLE_RELAY_DATA` | 否 | 默认 `false`。设为 `true` 时仅转发控制面(路由同步、节点发现、打洞协调、Ping/Pong),丢弃节点间数据面转发,并在路由信息中发布 `avoid_relay_data`。 |
 | `MAX_FRAME_BYTES` | 否 | 单帧上限，默认 1 MiB，允许范围为 1 KiB–16 MiB。 |
+| `MAX_PENDING_PER_IP` | 否 | 同一出口 IP 并发未完成握手连接的上限，默认 `17`，允许范围 1–2048。仅限流握手阶段,不影响共享 NAT 出口已认证节点。 |
+| `CONNECTION_MODE` | 否 | 握手方式选择器。`secure`(默认):仅接受 Noise XX 安全握手。`legacy`:仅接受 EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端。`auto`:按首包类型自动接受两种握手。legacy 模式下传输层不加密。 |
 
 通过 Wrangler 写入生产凭据：
 
@@ -106,7 +108,20 @@ easytier-core \
   -p 'wss://<worker-domain>/'
 ```
 
-服务端强制 private-mode 语义：只有 `network_name` 与 `network_secret` 均匹配且完成 `NetworkSecretConfirmed` 认证的节点才能接入，其他网络身份一律拒绝。该部署模型会明确拒绝旧版明文模式和仅凭 credential 接入的节点。
+服务端强制 private-mode 语义：只有 `network_name` 与 `network_secret` 均匹配且完成 `NetworkSecretConfirmed` 认证的节点才能接入，其他网络身份一律拒绝。
+
+### 接入无法配置安全模式的客户端(`CONNECTION_MODE=legacy` 或 `auto`)
+
+部分客户端(旧版本、GUI 前端、嵌入式移植)无法配置 secure mode。将 `CONNECTION_MODE` 设为 `legacy`(仅明文握手)或 `auto`(两种握手均可),即可在不加 `--secure-mode` 的情况下接入:
+
+```bash
+easytier-core \
+  --network-name office \
+  --network-secret 'replace-with-a-random-secret' \
+  -p 'wss://<worker-domain>/'
+```
+
+服务端按上游 EasyTier 2.6.4 的 `HandShake` 交换流程响应:双方通过交换网络密码摘要(SipHash 分片摘要,常数时间比较)证明网络身份后才允许接入。传输层保持明文(中继不加密流量),因此只要节点全部支持,请优先使用 `secure` 模式。
 
 ## 工具链
 

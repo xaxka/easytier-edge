@@ -51,7 +51,7 @@ struct SessionState {
 struct RouteGroupData {
     peers: BTreeSet<PeerId>, // 房间内已知的节点标识
     peer_infos: HashMap<PeerId, RoutePeerInfo>,
-    authenticated_peer_keys: HashMap<PeerId, [u8; 32]>,
+    authenticated_peer_keys: HashMap<PeerId, Vec<u8>>,
     sessions: HashMap<PeerId, SessionState>,
     peer_conn_versions: HashMap<PeerId, Version>,
     topology_version: u64,
@@ -149,14 +149,19 @@ impl RouteState {
         peer_id: PeerId,
         public_key: &[u8],
     ) -> Result<(), JsValue> {
-        let public_key: [u8; 32] = public_key
-            .try_into()
-            .map_err(|_| JsValue::from_str("authenticated peer public key must be 32 bytes"))?;
+        // legacy 握手的节点没有 Noise 静态公钥,以空键表示;
+        // secure 模式节点必须提供 32 字节公钥。
+        if !public_key.is_empty() && public_key.len() != 32 {
+            return Err(JsValue::from_str(
+                "authenticated peer public key must be 32 bytes or empty for legacy peers",
+            ));
+        }
+        let public_key = public_key.to_vec();
         let my_peer_id = self.my_peer_id;
         let g = self.ensure_group(group_key);
         if g.authenticated_peer_keys
             .get(&peer_id)
-            .is_some_and(|current| current != &public_key)
+            .is_some_and(|current| current.as_slice() != public_key.as_slice())
         {
             return Err(JsValue::from_str(
                 "peer id is already bound to another authenticated public key",
@@ -453,10 +458,12 @@ impl RouteState {
                 if info.peer_id != from_peer_id {
                     continue;
                 }
-                let authenticated_key = g
-                    .authenticated_peer_keys
-                    .get(&from_peer_id)
-                    .ok_or_else(|| JsValue::from_str("route peer has no authenticated public key"))?;
+                let authenticated_key =
+                    g.authenticated_peer_keys
+                        .get(&from_peer_id)
+                        .ok_or_else(|| {
+                            JsValue::from_str("route peer has no authenticated public key")
+                        })?;
                 if info.noise_static_pubkey.as_slice() != authenticated_key.as_slice() {
                     return Err(JsValue::from_str(
                         "RoutePeerInfo public key does not match the authenticated Noise identity",
@@ -468,8 +475,7 @@ impl RouteState {
                     .get(&info.peer_id)
                     .is_some_and(|current| current.inst_id != info.inst_id);
                 let should_update = instance_changed
-                    || g
-                        .peer_infos
+                    || g.peer_infos
                         .get(&info.peer_id)
                         .is_none_or(|current| info.version > current.version);
                 if !should_update {
@@ -542,14 +548,11 @@ impl RouteState {
         }
 
         let topology_version = g.topology_version;
-        if g.sessions
-            .get(&target_peer_id)
-            .is_some_and(|session| {
-                session.last_topology_version == topology_version
-                    && Self::now_ms().saturating_sub(session.last_topology_touch_ms)
-                        < SAVED_ROUTE_VERSION_TTL_MS
-            })
-        {
+        if g.sessions.get(&target_peer_id).is_some_and(|session| {
+            session.last_topology_version == topology_version
+                && Self::now_ms().saturating_sub(session.last_topology_touch_ms)
+                    < SAVED_ROUTE_VERSION_TTL_MS
+        }) {
             return Ok(None);
         }
 

@@ -32,7 +32,11 @@ pub struct PacketHeader {
 impl PacketHeader {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < HEADER_SIZE {
-            return Err(format!("header too short: {} < {}", bytes.len(), HEADER_SIZE));
+            return Err(format!(
+                "header too short: {} < {}",
+                bytes.len(),
+                HEADER_SIZE
+            ));
         }
         let b = &bytes[..HEADER_SIZE];
         Ok(PacketHeader {
@@ -128,7 +132,9 @@ pub fn prepare_forward(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
 pub fn prepare_pong(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
     let header = parse_packet(bytes).map_err(|message| JsValue::from_str(&message))?;
     if header.packet_type != PACKET_TYPE_PING {
-        return Err(JsValue::from_str("only an EasyTier Ping packet can become Pong"));
+        return Err(JsValue::from_str(
+            "only an EasyTier Ping packet can become Pong",
+        ));
     }
     let mut pong = bytes.to_vec();
     pong[8] = PACKET_TYPE_PONG;
@@ -181,9 +187,7 @@ pub fn is_relay_data_packet(bytes: &[u8]) -> Result<bool, JsValue> {
         // 上游语义(inner.is_none_or(is_relay_data_packet_type)):
         // 内层无法解析时按数据面保守丢弃;内层类型沿用同一分类函数,
         // 因此嵌套 ForeignNetworkPacket 也属于中继数据。
-        return Ok(
-            foreign_network_inner_packet_type(bytes).map_or(true, is_relay_data_packet_type),
-        );
+        return Ok(foreign_network_inner_packet_type(bytes).map_or(true, is_relay_data_packet_type));
     }
     Ok(is_data_plane_packet_type(header.packet_type))
 }
@@ -237,7 +241,16 @@ mod tests {
         ] {
             assert!(is_relay_data_packet(&frame(packet_type, &[9])).unwrap());
         }
-        for packet_type in [2u8, PACKET_TYPE_PING, PACKET_TYPE_PONG, 8u8, 9u8, 13u8, 20u8, 21u8] {
+        for packet_type in [
+            2u8,
+            PACKET_TYPE_PING,
+            PACKET_TYPE_PONG,
+            8u8,
+            9u8,
+            13u8,
+            20u8,
+            21u8,
+        ] {
             assert!(!is_relay_data_packet(&frame(packet_type, &[9])).unwrap());
         }
     }
@@ -250,9 +263,7 @@ mod tests {
         assert!(is_relay_data_packet(&foreign_frame(Some(PACKET_TYPE_DATA))).unwrap());
         // 内层是嵌套 ForeignNetworkPacket:上游 is_relay_data_packet_type
         // 对 ForeignNetworkPacket 返回 true,同样按数据面丢弃。
-        assert!(
-            is_relay_data_packet(&foreign_frame(Some(PACKET_TYPE_FOREIGN_NETWORK))).unwrap()
-        );
+        assert!(is_relay_data_packet(&foreign_frame(Some(PACKET_TYPE_FOREIGN_NETWORK))).unwrap());
         // 内层无法解析:按数据面保守处理。
         assert!(is_relay_data_packet(&foreign_frame(None)).unwrap());
     }

@@ -2,6 +2,14 @@ interface RoomConfig {
 	network_secret: string;
 }
 
+/**
+ * 握手方式:
+ * - `secure`: 仅接受 Noise XX 安全握手(默认,与旧版行为一致)。
+ * - `legacy`: 仅接受旧版 Handshake 握手,面向无法配置 secure mode 的客户端。
+ * - `auto`: 按首包类型自动选择两种握手之一。
+ */
+export type ConnectionMode = "secure" | "legacy" | "auto";
+
 export interface ServerConfig {
 	rooms: ReadonlyMap<string, RoomConfig>;
 	networkName: string;
@@ -13,6 +21,7 @@ export interface ServerConfig {
 	disableRelayData: boolean;
 	maxFrameBytes: number;
 	maxPendingPerIp: number;
+	connectionMode: ConnectionMode;
 }
 
 export interface EasyTierEnv {
@@ -25,6 +34,7 @@ export interface EasyTierEnv {
 	EASYTIER_HOSTNAME?: string;
 	MAX_FRAME_BYTES?: string;
 	MAX_PENDING_PER_IP?: string;
+	CONNECTION_MODE?: string;
 }
 
 const UTF8_ENCODER = new TextEncoder();
@@ -69,6 +79,10 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 	// DISABLE_RELAY_DATA=true 时只保留控制面(信令),丢弃节点间数据面转发,
 	// 与上游 EasyTier 的 disable_relay_data / avoid_relay_data 语义一致。
 	const disableRelayData = parseBoolean(env.DISABLE_RELAY_DATA, "DISABLE_RELAY_DATA");
+	// CONNECTION_MODE 切换握手方式:secure(默认)/ legacy / auto。
+	// legacy 模式面向无法配置 secure mode 的客户端,传输层不加密,
+	// 身份认证依赖 network_secret 摘要匹配。
+	const connectionMode = parseConnectionMode(env.CONNECTION_MODE);
 	const hostname = env.EASYTIER_HOSTNAME ?? "edge";
 	if (
 		typeof hostname !== "string" ||
@@ -87,6 +101,7 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 			disableRelayData,
 			maxFrameBytes,
 			maxPendingPerIp,
+			connectionMode,
 		};
 	}
 
@@ -106,7 +121,17 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 		disableRelayData,
 		maxFrameBytes,
 		maxPendingPerIp,
+		connectionMode,
 	};
+}
+
+function parseConnectionMode(value: string | undefined): ConnectionMode {
+	if (value === undefined || value === "") return "secure";
+	const normalized = value.trim().toLowerCase();
+	if (normalized === "secure" || normalized === "legacy" || normalized === "auto") {
+		return normalized;
+	}
+	throw new Error("CONNECTION_MODE must be one of: secure, legacy, auto");
 }
 
 function parsePositiveInt(

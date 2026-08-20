@@ -38,7 +38,7 @@ Packets addressed to the relay are authenticated, decrypted, and processed by th
 - Bounded RPC fragmentation, transaction tracking, and anti-replay state
 - Frame, hop, and outbound-capacity limits on the relay path
 - Optional `DISABLE_RELAY_DATA=true`: keep the control plane (signaling) only, drop peer data-plane forwarding, and advertise the `avoid_relay_data` feature flag to peers (aligned with upstream EasyTier's `disable_relay_data`)
-- No legacy plaintext mode
+- Switchable handshake via `CONNECTION_MODE`: `secure` (default, Noise XX only), `legacy` (EasyTier 2.6.4 plaintext `HandShake` with network-secret digest matching, for clients that cannot configure secure mode), or `auto` (accept either, selected by the first packet)
 
 ## Deploy
 
@@ -85,7 +85,8 @@ EASYTIER_HOSTNAME=edge
 | `EASYTIER_HOSTNAME` | No | Advertised hostname; defaults to `edge`, maximum 255 UTF-8 bytes. |
 | `DISABLE_RELAY_DATA` | No | Defaults to `false`. When `true`, only the control plane (route sync, discovery, hole-punch coordination, ping/pong) is forwarded; peer data-plane forwarding is dropped and `avoid_relay_data` is advertised in route info. |
 | `MAX_FRAME_BYTES` | No | Frame limit; defaults to 1 MiB, allowed range 1 KiB–16 MiB. |
-| `MAX_PENDING_PER_IP` | No | Per-IP cap on concurrent connections that have not finished the Noise handshake; defaults to `17`, allowed range 1–2048. Only throttles handshakes, never authenticated peers behind shared NAT. |
+| `MAX_PENDING_PER_IP` | No | Per-IP cap on concurrent connections that have not finished the handshake; defaults to `17`, allowed range 1–2048. Only throttles handshakes, never authenticated peers behind shared NAT. |
+| `CONNECTION_MODE` | No | Handshake selector. `secure` (default): accept only Noise XX secure handshakes. `legacy`: accept only the EasyTier 2.6.4 plaintext `HandShake` exchange authenticated by the network-secret digest, for clients that cannot configure secure mode. `auto`: accept either, selected by the first packet. Legacy mode never encrypts the transport. |
 
 Set production credentials through Wrangler:
 
@@ -107,7 +108,20 @@ easytier-core \
   -p 'wss://<worker-domain>/'
 ```
 
-The relay enforces private-mode semantics: only peers whose `network_name` and `network_secret` both match and that complete `NetworkSecretConfirmed` authentication are admitted; any other network identity is rejected. Legacy plaintext and credential-only admission are intentionally rejected by this deployment model.
+The relay enforces private-mode semantics: only peers whose `network_name` and `network_secret` both match and that complete `NetworkSecretConfirmed` authentication are admitted; any other network identity is rejected.
+
+### Connecting clients without secure mode (`CONNECTION_MODE=legacy` or `auto`)
+
+Some clients (older builds, GUI frontends, embedded ports) cannot configure secure mode. Set `CONNECTION_MODE` to `legacy` (plaintext only) or `auto` (either handshake) and connect without `--secure-mode`:
+
+```bash
+easytier-core \
+  --network-name office \
+  --network-secret 'replace-with-a-random-secret' \
+  -p 'wss://<worker-domain>/'
+```
+
+The relay answers the upstream EasyTier 2.6.4 `HandShake` exchange: both sides prove the network identity by exchanging the network-secret digest (SipHash-based, compared in constant time) before admission. The transport stays plaintext — traffic is not encrypted by the relay — so prefer `secure` mode whenever every peer supports it.
 
 ## Toolchain
 

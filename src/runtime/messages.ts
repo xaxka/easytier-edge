@@ -3,6 +3,12 @@ interface HandshakeInfo {
 	networkName: string;
 }
 
+interface LegacyHandshakeInfo {
+	peerId: number;
+	networkName: string;
+	networkSecretDigest: Uint8Array;
+}
+
 interface AuthenticationInfo {
 	peerId: number;
 	networkName: string;
@@ -31,6 +37,17 @@ export function parseHandshakeInfo(json: string): HandshakeInfo {
 	};
 }
 
+export function parseLegacyHandshakeInfo(json: string): LegacyHandshakeInfo {
+	const value = parseObject(json, "legacy Handshake result");
+	return {
+		peerId: readPeerId(value.peer_id, "peer_id"),
+		networkName: readString(value.network_name, "network_name"),
+		networkSecretDigest: decodeDigest(
+			readString(value.network_secret_digest_base64, "network_secret_digest_base64"),
+		),
+	};
+}
+
 export function parseAuthenticationInfo(json: string): AuthenticationInfo {
 	const value = parseObject(json, "NoiseHandshakeMsg3 result");
 	if (value.auth_level !== "NetworkSecretConfirmed") {
@@ -56,6 +73,19 @@ function decodePublicKey(base64: string): Uint8Array {
 		throw new Error("remote_public_key_base64 must decode to 32 bytes");
 	}
 	return key;
+}
+
+function decodeDigest(base64: string): Uint8Array {
+	let digest: Uint8Array;
+	try {
+		digest = Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+	} catch (error) {
+		throw new Error("network_secret_digest_base64 is not valid base64", { cause: error });
+	}
+	if (digest.byteLength !== 32) {
+		throw new Error("network_secret_digest_base64 must decode to 32 bytes");
+	}
+	return digest;
 }
 
 function parseObject(json: string, operation: string): Record<string, unknown> {

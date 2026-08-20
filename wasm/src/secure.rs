@@ -7,8 +7,7 @@
 use std::{cell::RefCell, collections::HashMap};
 
 use aes_gcm::{
-    AeadInPlace as _, Aes128Gcm, Aes256Gcm, KeyInit as _, Nonce,
-    aead::generic_array::GenericArray,
+    AeadInPlace as _, Aes128Gcm, Aes256Gcm, KeyInit as _, Nonce, aead::generic_array::GenericArray,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chacha20poly1305::ChaCha20Poly1305;
@@ -25,8 +24,7 @@ use crate::{
     proto::{
         common::Uuid,
         peer_rpc::{
-            PeerConnNoiseMsg1Pb, PeerConnNoiseMsg2Pb, PeerConnNoiseMsg3Pb,
-            PeerConnSessionActionPb,
+            PeerConnNoiseMsg1Pb, PeerConnNoiseMsg2Pb, PeerConnNoiseMsg3Pb, PeerConnSessionActionPb,
         },
     },
 };
@@ -277,7 +275,9 @@ impl SecurePeer {
         let configured_public = decode_key(local_public_key_base64, "public")?;
         let derived_public = PublicKey::from(&StaticSecret::from(private)).to_bytes();
         if derived_public != configured_public {
-            return Err(js_error("local_public_key does not match local_private_key"));
+            return Err(js_error(
+                "local_public_key does not match local_private_key",
+            ));
         }
 
         Ok(Self {
@@ -315,7 +315,9 @@ impl SecurePeer {
         }
         let (header, payload) = split_packet(packet)?;
         if header.packet_type != PACKET_NOISE_MSG1 || header.flags & ENCRYPTED_FLAG != 0 {
-            return Err(js_error("secure mode requires an unencrypted NoiseHandshakeMsg1"));
+            return Err(js_error(
+                "secure mode requires an unencrypted NoiseHandshakeMsg1",
+            ));
         }
         if header.from_peer_id == 0 || header.from_peer_id == self.server_peer_id {
             return Err(js_error("invalid or conflicting client peer id"));
@@ -333,7 +335,8 @@ impl SecurePeer {
         let decoded_len = handshake
             .read_message(payload, &mut decoded)
             .map_err(display_error)?;
-        let message = PeerConnNoiseMsg1Pb::decode(&decoded[..decoded_len]).map_err(display_error)?;
+        let message =
+            PeerConnNoiseMsg1Pb::decode(&decoded[..decoded_len]).map_err(display_error)?;
         if message.version != EASYTIER_PROTOCOL_VERSION {
             return Err(js_error("unsupported EasyTier secure handshake version"));
         }
@@ -365,7 +368,9 @@ impl SecurePeer {
         if self.session_key.is_some() {
             return Err(js_error("message 2 was already built"));
         }
-        let peer_id = self.peer_id.ok_or_else(|| js_error("message 1 not received"))?;
+        let peer_id = self
+            .peer_id
+            .ok_or_else(|| js_error("message 1 not received"))?;
         let network_name = self
             .network_name
             .clone()
@@ -386,11 +391,7 @@ impl SecurePeer {
             .client_algorithm
             .as_deref()
             .ok_or_else(|| js_error("message 1 has no encryption algorithm"))?;
-        let session = upsert_session(
-            &session_key,
-            self.a_session_generation,
-            client_algorithm,
-        )?;
+        let session = upsert_session(&session_key, self.a_session_generation, client_algorithm)?;
         let b_conn_id = random_uuid()?;
         let message = PeerConnNoiseMsg2Pb {
             b_network_name: network_name,
@@ -431,7 +432,9 @@ impl SecurePeer {
     /// 连接在此步骤成功前不可参与路由。
     pub fn finish_msg3(&mut self, packet: &[u8]) -> Result<String, JsValue> {
         let (header, payload) = split_packet(packet)?;
-        let peer_id = self.peer_id.ok_or_else(|| js_error("message 1 not received"))?;
+        let peer_id = self
+            .peer_id
+            .ok_or_else(|| js_error("message 1 not received"))?;
         if header.packet_type != 15
             || header.from_peer_id != peer_id
             || header.to_peer_id != self.server_peer_id
@@ -447,7 +450,8 @@ impl SecurePeer {
         let decoded_len = handshake
             .read_message(payload, &mut decoded)
             .map_err(display_error)?;
-        let message = PeerConnNoiseMsg3Pb::decode(&decoded[..decoded_len]).map_err(display_error)?;
+        let message =
+            PeerConnNoiseMsg3Pb::decode(&decoded[..decoded_len]).map_err(display_error)?;
         if message.a_conn_id_echo != self.a_conn_id || message.b_conn_id_echo != self.b_conn_id {
             return Err(js_error("Noise connection id echo mismatch"));
         }
@@ -463,7 +467,8 @@ impl SecurePeer {
             .proof_challenge
             .as_deref()
             .ok_or_else(|| js_error("proof challenge is missing"))?;
-        let mut verifier = <HmacSha256 as hmac::Mac>::new_from_slice(secret).map_err(display_error)?;
+        let mut verifier =
+            <HmacSha256 as hmac::Mac>::new_from_slice(secret).map_err(display_error)?;
         verifier.update(b"easytier secret proof");
         verifier.update(challenge);
         verifier
@@ -622,9 +627,11 @@ impl SecurePeer {
     }
 
     fn traffic_key(&self, epoch: u32, direction: usize) -> Result<[u8; 32], JsValue> {
-        let root_key = self.root_key.ok_or_else(|| js_error("root key is missing"))?;
-        let mut extract = <HmacSha256 as hmac::Mac>::new_from_slice(&[0_u8; 32])
-            .map_err(display_error)?;
+        let root_key = self
+            .root_key
+            .ok_or_else(|| js_error("root key is missing"))?;
+        let mut extract =
+            <HmacSha256 as hmac::Mac>::new_from_slice(&[0_u8; 32]).map_err(display_error)?;
         extract.update(&root_key);
         let prk = extract.finalize().into_bytes();
         let mut expand = <HmacSha256 as hmac::Mac>::new_from_slice(&prk).map_err(display_error)?;
@@ -865,15 +872,16 @@ fn open(
     let mut output = ciphertext.to_vec();
     let nonce = Nonce::from_slice(nonce);
     let tag = GenericArray::from_slice(tag);
-    let result = match normalized_algorithm(algorithm)? {
-        "aes-gcm" => Aes128Gcm::new(GenericArray::from_slice(&key[..16]))
-            .decrypt_in_place_detached(nonce, &[], &mut output, tag),
-        "aes-256-gcm" => Aes256Gcm::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(nonce, &[], &mut output, tag),
-        "chacha20" => ChaCha20Poly1305::new(GenericArray::from_slice(key))
-            .decrypt_in_place_detached(nonce, &[], &mut output, tag),
-        _ => unreachable!(),
-    };
+    let result =
+        match normalized_algorithm(algorithm)? {
+            "aes-gcm" => Aes128Gcm::new(GenericArray::from_slice(&key[..16]))
+                .decrypt_in_place_detached(nonce, &[], &mut output, tag),
+            "aes-256-gcm" => Aes256Gcm::new(GenericArray::from_slice(key))
+                .decrypt_in_place_detached(nonce, &[], &mut output, tag),
+            "chacha20" => ChaCha20Poly1305::new(GenericArray::from_slice(key))
+                .decrypt_in_place_detached(nonce, &[], &mut output, tag),
+            _ => unreachable!(),
+        };
     result.map_err(|_| js_error("EasyTier session decryption failed"))?;
     Ok(output)
 }
@@ -1052,9 +1060,12 @@ fn decode_key(value: &str, label: &str) -> Result<[u8; 32], JsValue> {
     let decoded = BASE64_STANDARD
         .decode(value)
         .map_err(|_| js_error(&format!("local_{label}_key is not valid base64")))?;
-    decoded
-        .try_into()
-        .map_err(|bytes: Vec<u8>| js_error(&format!("local_{label}_key must decode to 32 bytes, got {}", bytes.len())))
+    decoded.try_into().map_err(|bytes: Vec<u8>| {
+        js_error(&format!(
+            "local_{label}_key must decode to 32 bytes, got {}",
+            bytes.len()
+        ))
+    })
 }
 
 fn split_packet(bytes: &[u8]) -> Result<(PacketHeader, &[u8]), JsValue> {

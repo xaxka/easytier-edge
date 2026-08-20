@@ -4,11 +4,15 @@ import { type SecurePeer } from "../wasm";
 
 type ConnectionPhase = "msg1" | "msg3" | "ready" | "closed";
 
+/** 连接采用的握手方式:Noise XX 安全握手或旧版明文握手。 */
+export type HandshakeMode = "secure" | "legacy";
+
 export interface Connection extends RpcPeer {
 	socket: WebSocket;
 	secure: SecurePeer;
 	remotePublicKey: Uint8Array;
 	phase: ConnectionPhase;
+	mode: HandshakeMode;
 	clientIp: string;
 	handshakeTimer: ReturnType<typeof setTimeout> | null;
 	sendWindowStartedAt: number;
@@ -32,6 +36,7 @@ export function createConnection(
 		secure,
 		remotePublicKey: new Uint8Array(),
 		phase: "msg1",
+		mode: "secure",
 		peerId: 0,
 		networkName: "",
 		clientIp,
@@ -40,7 +45,10 @@ export function createConnection(
 		sendWindowStartedAt: Date.now(),
 		sentBytesInWindow: 0,
 		sentFramesInWindow: 0,
-		encrypt: (packet) => secure.encrypt_packet(packet),
+		// legacy 连接没有会话密钥,控制面帧按明文直通;
+		// secure 连接在握手完成后用 AEAD 加密。
+		encrypt: (packet) =>
+			connection.mode === "legacy" ? packet : connection.secure.encrypt_packet(packet),
 		send: (packet) => sendConnection(connection, packet),
 	};
 	connection.handshakeTimer = setTimeout(

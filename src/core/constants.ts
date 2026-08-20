@@ -6,6 +6,7 @@ export const WS_OPEN = 1;
 
 export enum PacketType {
 	Data = 1,
+	Handshake = 2,
 	Ping = 4,
 	Pong = 5,
 	RpcReq = 8,
