@@ -15,7 +15,6 @@ export default {
 					{
 						ok: true,
 						secure_mode: true,
-						network: config.networkName,
 						disable_relay_data: config.disableRelayData,
 					},
 					{ headers: { "cache-control": "no-store" } },
