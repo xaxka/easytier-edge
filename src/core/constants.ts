@@ -1,4 +1,6 @@
 export const EASYTIER_HEADER_SIZE = 16;
+export const EASYTIER_AEAD_TAIL_SIZE = 28;
+export const MAX_FORWARD_HOPS = 7;
 export const SERVER_PEER_ID = 10_000_001;
 export const WS_OPEN = 1;
 
