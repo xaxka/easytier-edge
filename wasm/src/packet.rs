@@ -138,7 +138,8 @@ pub fn prepare_pong(bytes: &[u8]) -> Result<Vec<u8>, JsValue> {
 /// 判断一个包是否属于"中继数据面",语义与上游 EasyTier 2.6.4 的
 /// `PeerManager::is_relay_data_zc_packet` 保持一致:
 /// - 纯数据包(Data / KCP / QUIC 及其 SrcModified 变体)属于数据面;
-/// - ForeignNetworkPacket 需要检查内层包类型,内层无法解析时按数据面处理(保守丢弃);
+/// - ForeignNetworkPacket 需要检查内层包类型,内层无法解析或内层为嵌套
+///   ForeignNetworkPacket 时按数据面处理(保守丢弃);
 /// - RPC、Ping/Pong、Noise 握手、RelayHandshake 等控制面一律不属于数据面。
 fn is_data_plane_packet_type(packet_type: u8) -> bool {
     matches!(
@@ -151,6 +152,14 @@ fn is_data_plane_packet_type(packet_type: u8) -> bool {
             | PACKET_TYPE_DATA_KCP_MODIFIED
             | PACKET_TYPE_DATA_QUIC_MODIFIED
     )
+}
+
+/// 与上游 `traffic_metrics::is_relay_data_packet_type` 一致:数据面包类型
+/// 以及 ForeignNetworkPacket 本身都属于"中继数据"。ForeignNetworkPacket
+/// 在 `is_relay_data_packet` 中会进一步检查内层包,但内层若是嵌套的
+/// ForeignNetworkPacket,上游同样按数据面处理。
+fn is_relay_data_packet_type(packet_type: u8) -> bool {
+    is_data_plane_packet_type(packet_type) || packet_type == PACKET_TYPE_FOREIGN_NETWORK
 }
 
 fn foreign_network_inner_packet_type(bytes: &[u8]) -> Option<u8> {
@@ -169,8 +178,11 @@ fn foreign_network_inner_packet_type(bytes: &[u8]) -> Option<u8> {
 pub fn is_relay_data_packet(bytes: &[u8]) -> Result<bool, JsValue> {
     let header = PacketHeader::from_bytes(bytes).map_err(|message| JsValue::from_str(&message))?;
     if header.packet_type == PACKET_TYPE_FOREIGN_NETWORK {
+        // 上游语义(inner.is_none_or(is_relay_data_packet_type)):
+        // 内层无法解析时按数据面保守丢弃;内层类型沿用同一分类函数,
+        // 因此嵌套 ForeignNetworkPacket 也属于中继数据。
         return Ok(
-            foreign_network_inner_packet_type(bytes).map_or(true, is_data_plane_packet_type),
+            foreign_network_inner_packet_type(bytes).map_or(true, is_relay_data_packet_type),
         );
     }
     Ok(is_data_plane_packet_type(header.packet_type))
@@ -236,6 +248,11 @@ mod tests {
         assert!(!is_relay_data_packet(&foreign_frame(Some(8))).unwrap());
         // 内层是 Data(数据面):属于中继数据。
         assert!(is_relay_data_packet(&foreign_frame(Some(PACKET_TYPE_DATA))).unwrap());
+        // 内层是嵌套 ForeignNetworkPacket:上游 is_relay_data_packet_type
+        // 对 ForeignNetworkPacket 返回 true,同样按数据面丢弃。
+        assert!(
+            is_relay_data_packet(&foreign_frame(Some(PACKET_TYPE_FOREIGN_NETWORK))).unwrap()
+        );
         // 内层无法解析:按数据面保守处理。
         assert!(is_relay_data_packet(&foreign_frame(None)).unwrap());
     }
