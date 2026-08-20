@@ -25,6 +25,13 @@ import {
 import { RoomRegistry } from "./runtime/rooms";
 
 const MAX_CONNECTIONS = 2_048;
+/**
+ * 未完成 Noise 握手的连接配额:防止攻击者用大量裸 socket 占满
+ * 2048 个连接槽,把真实节点挤成 503。握手超时(10s)保证配额会自动释放。
+ */
+const MAX_PENDING_HANDSHAKES = 256;
+const MAX_PENDING_HANDSHAKES_PER_IP = 8;
+const UNKNOWN_IP = "unknown";
 
 export class EasyTierServer extends DurableObject<EasyTierEnv> {
 	private readonly config: ServerConfig;
@@ -33,6 +40,8 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 	private readonly localPublicKey: string;
 	private readonly connections = new Map<WebSocket, Connection>();
 	private readonly rooms = new RoomRegistry();
+	private pendingHandshakes = 0;
+	private readonly pendingHandshakesByIp = new Map<string, number>();
 	private maintenanceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(ctx: DurableObjectState, env: EasyTierEnv) {
@@ -64,7 +73,14 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
 			return new Response("Expected a WebSocket upgrade", { status: 426 });
 		}
-		if (this.connections.size >= MAX_CONNECTIONS) {
+		// 限流只针对"未完成握手"的连接:认证后的节点可能共享 NAT 出口 IP
+		// (例如家里手机和电脑),按 IP 限制已认证连接会误伤正常节点。
+		const ipKey = request.headers.get("CF-Connecting-IP") ?? UNKNOWN_IP;
+		if (
+			this.connections.size >= MAX_CONNECTIONS ||
+			this.pendingHandshakes >= MAX_PENDING_HANDSHAKES ||
+			(this.pendingHandshakesByIp.get(ipKey) ?? 0) >= MAX_PENDING_HANDSHAKES_PER_IP
+		) {
 			return new Response("EasyTier connection capacity exceeded", { status: 503 });
 		}
 
@@ -88,10 +104,12 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		server.binaryType = "arraybuffer";
 		server.accept();
 
-		const connection = createConnection(server, secure, (expired) => {
+		const connection = createConnection(server, secure, ipKey, (expired) => {
 			this.close(expired, 4408, "secure handshake timeout");
 		});
 		this.connections.set(server, connection);
+		this.pendingHandshakes += 1;
+		this.pendingHandshakesByIp.set(ipKey, (this.pendingHandshakesByIp.get(ipKey) ?? 0) + 1);
 		this.scheduleMaintenance();
 		server.addEventListener("message", (event) => {
 			try {
@@ -165,7 +183,19 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		connection.remotePublicKey = auth.remotePublicKey;
 		this.registerConnection(connection);
 		completeHandshake(connection);
+		this.releaseHandshakeSlot(connection);
 		this.broadcastRouteUpdate(connection.networkName);
+	}
+
+	/** 握手完成或未认证断开时,归还未认证连接配额。 */
+	private releaseHandshakeSlot(connection: Connection): void {
+		if (this.pendingHandshakes > 0) this.pendingHandshakes -= 1;
+		const remaining = (this.pendingHandshakesByIp.get(connection.clientIp) ?? 1) - 1;
+		if (remaining > 0) {
+			this.pendingHandshakesByIp.set(connection.clientIp, remaining);
+		} else {
+			this.pendingHandshakesByIp.delete(connection.clientIp);
+		}
 	}
 
 	private handleReadyPacket(
@@ -240,6 +270,7 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		const wasReady = connection.phase === "ready";
 		connection.phase = "closed";
 		this.connections.delete(connection.socket);
+		if (!wasReady) this.releaseHandshakeSlot(connection);
 		if (this.connections.size === 0 && this.maintenanceTimer) {
 			clearTimeout(this.maintenanceTimer);
 			this.maintenanceTimer = null;

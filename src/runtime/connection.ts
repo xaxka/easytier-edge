@@ -9,6 +9,7 @@ export interface Connection extends RpcPeer {
 	secure: SecurePeer;
 	remotePublicKey: Uint8Array;
 	phase: ConnectionPhase;
+	clientIp: string;
 	handshakeTimer: ReturnType<typeof setTimeout> | null;
 	sendWindowStartedAt: number;
 	sentBytesInWindow: number;
@@ -23,6 +24,7 @@ const MAX_SEND_FRAMES_PER_WINDOW = 4_096;
 export function createConnection(
 	socket: WebSocket,
 	secure: SecurePeer,
+	clientIp: string,
 	onHandshakeTimeout: (connection: Connection) => void,
 ): Connection {
 	const connection: Connection = {
@@ -32,6 +34,7 @@ export function createConnection(
 		phase: "msg1",
 		peerId: 0,
 		networkName: "",
+		clientIp,
 		serverSessionId: randomU64(),
 		handshakeTimer: null,
 		sendWindowStartedAt: Date.now(),
