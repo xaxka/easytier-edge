@@ -2,7 +2,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![CI](https://github.com/fordes123/easytier-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/fordes123/easytier-edge/actions/workflows/ci.yml)
+[![CI](https://github.com/xixka/easytier-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/xixka/easytier-edge/actions/workflows/ci.yml)
 
 **A secure EasyTier WebSocket relay running at the Cloudflare edge.**
 
@@ -40,7 +40,7 @@ Packets addressed to the relay are authenticated, decrypted, and processed by th
 
 ## Deploy
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/fordes123/easytier-edge)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/xixka/easytier-edge)
 
 The deployment requires three secrets:
 
