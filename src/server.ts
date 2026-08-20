@@ -5,6 +5,7 @@ import { type EasyTierEnv, type ServerConfig, readServerConfig } from "./core/co
 import {
 	createPong,
 	incrementForwardCounter,
+	isRelayDataPacket,
 	parsePacket,
 	toUint8Array,
 } from "./core/packet";
@@ -53,6 +54,7 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			this.config.localPublicKeyBytes ?? decodeBase64Key(localPublicKey),
 			this.config.hostname,
 			SERVER_PEER_ID,
+			this.config.disableRelayData,
 		);
 	}
 
@@ -173,6 +175,9 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 	): void {
 		const { header } = packet;
 		if (header.toPeerId !== SERVER_PEER_ID) {
+			// DISABLE_RELAY_DATA=true:丢弃节点间数据面流量,仅保留控制面(信令)转发。
+			// 对端已通过路由同步中的 avoid_relay_data 特性标志得知本中继不承载数据。
+			if (this.config.disableRelayData && isRelayDataPacket(frame)) return;
 			const target = this.findPeer(connection.networkName, header.toPeerId);
 			if (!target || target.phase !== "ready") return;
 			const forwarded = incrementForwardCounter(frame);

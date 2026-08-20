@@ -37,6 +37,7 @@ Packets addressed to the relay are authenticated, decrypted, and processed by th
 - Periodic OSPF session maintenance and route-version refresh
 - Bounded RPC fragmentation, transaction tracking, and anti-replay state
 - Frame, hop, and outbound-capacity limits on the relay path
+- Optional `DISABLE_RELAY_DATA=true`: keep the control plane (signaling) only, drop peer data-plane forwarding, and advertise the `avoid_relay_data` feature flag to peers (aligned with upstream EasyTier's `disable_relay_data`)
 - No legacy plaintext mode
 
 ## Deploy
@@ -82,6 +83,7 @@ EASYTIER_HOSTNAME=edge
 | `LOCAL_PRIVATE_KEY` | No | Base64-encoded 32-byte X25519 private key. An ephemeral key is generated when omitted. |
 | `LOCAL_PUBLIC_KEY` | No | Matching Base64-encoded 32-byte X25519 public key. Must be set together with the private key. |
 | `EASYTIER_HOSTNAME` | No | Advertised hostname; defaults to `edge`, maximum 255 UTF-8 bytes. |
+| `DISABLE_RELAY_DATA` | No | Defaults to `false`. When `true`, only the control plane (route sync, discovery, hole-punch coordination, ping/pong) is forwarded; peer data-plane forwarding is dropped and `avoid_relay_data` is advertised in route info. |
 | `MAX_FRAME_BYTES` | No | Frame limit; defaults to 1 MiB, allowed range 1 KiB–16 MiB. |
 
 Set production credentials through Wrangler:

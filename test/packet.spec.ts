@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { PacketType } from "../src/core/constants";
-import { createPacket, incrementForwardCounter, parsePacket } from "../src/core/packet";
+import {
+	createPacket,
+	incrementForwardCounter,
+	isRelayDataPacket,
+	parsePacket,
+} from "../src/core/packet";
 
 describe("EasyTier packet framing", () => {
 	it("uses the upstream 16-byte little-endian peer-manager header", () => {
@@ -26,5 +31,17 @@ describe("EasyTier packet framing", () => {
 		const frame = createPacket(1, 2, PacketType.Data, new Uint8Array([9]));
 		new DataView(frame.buffer).setUint32(12, 99, true);
 		expect(() => parsePacket(frame)).toThrow(/payload length/);
+	});
+
+	it("classifies relay data-plane packets like upstream disable_relay_data", () => {
+		expect(isRelayDataPacket(createPacket(1, 2, PacketType.Data, new Uint8Array([9])))).toBe(
+			true,
+		);
+		expect(isRelayDataPacket(createPacket(1, 2, PacketType.RpcReq, new Uint8Array([9])))).toBe(
+			false,
+		);
+		expect(isRelayDataPacket(createPacket(1, 2, PacketType.Ping, new Uint8Array([9])))).toBe(
+			false,
+		);
 	});
 });

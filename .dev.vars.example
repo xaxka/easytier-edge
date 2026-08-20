@@ -2,6 +2,10 @@ NETWORK_NAME=office
 NETWORK_SECRET=use-a-long-random-secret
 EASYTIER_HOSTNAME=edge
 
+# 可选:true 时仅转发控制面(信令/路由/打洞协调),丢弃节点间数据面转发,
+# 并通过 avoid_relay_data 特性标志告知节点不要把数据路由经过本中继。
+# DISABLE_RELAY_DATA=false
+
 # 可选:固定服务端 X25519 身份(不配置则每次启动自动生成临时密钥)。
 # 仅当希望客户端通过 peer_public_key 锁定本服务端身份时才需要设置。
 # LOCAL_PRIVATE_KEY=base64-encoded-32-byte-x25519-private-key

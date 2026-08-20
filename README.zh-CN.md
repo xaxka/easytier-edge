@@ -37,6 +37,7 @@ Durable Object
 - 周期维护 OSPF session 并刷新路由版本
 - 有界 RPC 分片、事务跟踪和防重放状态
 - 中继链路具备帧大小、跳数和发送容量限制
+- 可选 `DISABLE_RELAY_DATA=true`:仅保留控制面(信令),丢弃节点间数据面转发,并通过 `avoid_relay_data` 特性标志告知节点(对齐上游 EasyTier 的 `disable_relay_data`)
 - 不支持旧版明文模式
 
 ## 部署
@@ -82,6 +83,7 @@ EASYTIER_HOSTNAME=edge
 | `LOCAL_PRIVATE_KEY` | 否 | Base64 编码的 32 字节 X25519 私钥。未配置时自动生成临时密钥。 |
 | `LOCAL_PUBLIC_KEY` | 否 | 与私钥匹配的 Base64 编码 32 字节 X25519 公钥。与私钥必须成对配置。 |
 | `EASYTIER_HOSTNAME` | 否 | 对外发布的 hostname，默认 `edge`，最大 255 个 UTF-8 字节。 |
+| `DISABLE_RELAY_DATA` | 否 | 默认 `false`。设为 `true` 时仅转发控制面(路由同步、节点发现、打洞协调、Ping/Pong),丢弃节点间数据面转发,并在路由信息中发布 `avoid_relay_data`。 |
 | `MAX_FRAME_BYTES` | 否 | 单帧上限，默认 1 MiB，允许范围为 1 KiB–16 MiB。 |
 
 通过 Wrangler 写入生产凭据：

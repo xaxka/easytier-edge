@@ -1,4 +1,10 @@
-import { build_packet, inspect_packet, prepare_forward, prepare_pong } from "../wasm";
+import {
+	build_packet,
+	inspect_packet,
+	is_relay_data_packet,
+	prepare_forward,
+	prepare_pong,
+} from "../wasm";
 import { EASYTIER_HEADER_SIZE } from "./constants";
 
 interface PacketHeader {
@@ -37,6 +43,14 @@ export function createPacket(
 
 export function incrementForwardCounter(frame: Uint8Array): Uint8Array {
 	return prepare_forward(frame);
+}
+
+/**
+ * 判断帧是否属于中继数据面(与上游 disable_relay_data 的分类一致):
+ * Data/KCP/QUIC 数据包及 ForeignNetworkPacket(内层为数据或无法解析)。
+ */
+export function isRelayDataPacket(frame: Uint8Array): boolean {
+	return is_relay_data_packet(frame);
 }
 
 export function createPong(frame: Uint8Array): Uint8Array {

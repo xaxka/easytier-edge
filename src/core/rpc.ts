@@ -33,8 +33,14 @@ export class EasyTierRpc {
 	private readonly routeSyncStates = new Map<string, RouteSyncState>();
 	private readonly serverPeerId: number;
 
-	constructor(publicKey: Uint8Array, hostname: string, serverPeerId: number) {
+	constructor(
+		publicKey: Uint8Array,
+		hostname: string,
+		serverPeerId: number,
+		disableRelayData = false,
+	) {
 		this.core = new WasmRpcCore(publicKey, hostname, serverPeerId);
+		if (disableRelayData) this.core.set_avoid_relay_data(true);
 		this.serverPeerId = serverPeerId;
 	}
 

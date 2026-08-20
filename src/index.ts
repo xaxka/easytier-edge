@@ -12,7 +12,12 @@ export default {
 			try {
 				const config = readServerConfig(env);
 				return Response.json(
-					{ ok: true, secure_mode: true, network: config.networkName },
+					{
+						ok: true,
+						secure_mode: true,
+						network: config.networkName,
+						disable_relay_data: config.disableRelayData,
+					},
 					{ headers: { "cache-control": "no-store" } },
 				);
 			} catch (error) {

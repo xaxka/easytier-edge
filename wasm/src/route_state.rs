@@ -272,6 +272,27 @@ impl RouteState {
         Ok(())
     }
 
+    /// 在 OSPF 路由信息中发布 `avoid_relay_data` 特性标志,
+    /// 通知所有节点:本中继只参与控制面,请勿将数据面流量路由经过本节点。
+    pub(crate) fn set_my_avoid_relay_data(
+        &mut self,
+        group_key: &str,
+        enabled: bool,
+    ) -> Result<(), JsValue> {
+        let g = self.ensure_group(group_key);
+        let feature_flag = g
+            .my_info
+            .feature_flag
+            .get_or_insert_with(crate::proto::common::PeerFeatureFlag::default);
+        if feature_flag.avoid_relay_data == enabled {
+            return Ok(());
+        }
+        feature_flag.avoid_relay_data = enabled;
+        g.my_info_version += 1;
+        g.my_info.version = g.my_info_version;
+        Ok(())
+    }
+
     /// 生成发往目标节点的 SyncRouteInfoRequest 负载。
     pub(crate) fn build_sync_route_info_request(
         &mut self,

@@ -41,6 +41,12 @@ export class WasmRpcCore {
     handle_response(network: string, authenticated_peer_id: number, payload: Uint8Array, now_ms: bigint): boolean;
     constructor(public_key: Uint8Array, hostname: string, server_peer_id: number);
     remove_peer(network: string, peer_id: number): void;
+    /**
+     * 设置 avoid_relay_data 特性标志并同步到已存在的所有网络分组。
+     * 对应上游 EasyTier 的 disable_relay_data:控制面(RPC/路由/发现)保持在线,
+     * 数据面转发在服务端被丢弃,同时告知节点不要把数据路由经过本中继。
+     */
+    set_avoid_relay_data(enabled: boolean): void;
 }
 
 export function build_packet(from_peer_id: number, to_peer_id: number, packet_type: number, payload: Uint8Array): Uint8Array;
@@ -55,6 +61,8 @@ export function generate_keypair(): string;
 
 export function inspect_packet(bytes: Uint8Array): Uint32Array;
 
+export function is_relay_data_packet(bytes: Uint8Array): boolean;
+
 export function prepare_forward(bytes: Uint8Array): Uint8Array;
 
 export function prepare_pong(bytes: Uint8Array): Uint8Array;
@@ -68,6 +76,7 @@ export interface InitOutput {
     readonly build_packet: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly generate_keypair: (a: number) => void;
     readonly inspect_packet: (a: number, b: number, c: number) => void;
+    readonly is_relay_data_packet: (a: number, b: number, c: number) => void;
     readonly prepare_forward: (a: number, b: number, c: number) => void;
     readonly prepare_pong: (a: number, b: number, c: number) => void;
     readonly securepeer_build_msg2: (a: number, b: number, c: number, d: number) => void;
@@ -84,6 +93,7 @@ export interface InitOutput {
     readonly wasmrpccore_handle_response: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => void;
     readonly wasmrpccore_new: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly wasmrpccore_remove_peer: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmrpccore_set_avoid_relay_data: (a: number, b: number, c: number) => void;
     readonly __wbindgen_export: (a: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
     readonly __wbindgen_export2: (a: number, b: number) => number;

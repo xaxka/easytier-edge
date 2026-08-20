@@ -65,6 +65,7 @@ pub struct WasmRpcCore {
     public_key: Vec<u8>,
     hostname: String,
     server_peer_id: u32,
+    avoid_relay_data: bool,
 }
 
 #[wasm_bindgen]
@@ -93,7 +94,20 @@ impl WasmRpcCore {
             public_key: public_key.to_vec(),
             hostname: hostname.to_string(),
             server_peer_id,
+            avoid_relay_data: false,
         })
+    }
+
+    /// 设置 avoid_relay_data 特性标志并同步到已存在的所有网络分组。
+    /// 对应上游 EasyTier 的 disable_relay_data:控制面(RPC/路由/发现)保持在线,
+    /// 数据面转发在服务端被丢弃,同时告知节点不要把数据路由经过本中继。
+    pub fn set_avoid_relay_data(&mut self, enabled: bool) -> Result<(), JsValue> {
+        self.avoid_relay_data = enabled;
+        let groups: Vec<String> = self.configured_groups.iter().cloned().collect();
+        for group in groups {
+            self.routes.set_my_avoid_relay_data(&group, enabled)?;
+        }
+        Ok(())
     }
 
     pub fn add_peer(
@@ -109,6 +123,9 @@ impl WasmRpcCore {
                 .set_my_info_field(network, "hostname", &self.hostname)?;
             self.routes
                 .set_my_noise_public_key(network, &self.public_key)?;
+            if self.avoid_relay_data {
+                self.routes.set_my_avoid_relay_data(network, true)?;
+            }
         }
         self.peer_initiator
             .insert((network.to_string(), peer_id), false);

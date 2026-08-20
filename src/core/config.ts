@@ -10,6 +10,7 @@ export interface ServerConfig {
 	localPrivateKey?: string;
 	localPublicKey?: string;
 	localPublicKeyBytes?: Uint8Array;
+	disableRelayData: boolean;
 	maxFrameBytes: number;
 }
 
@@ -19,6 +20,7 @@ export interface EasyTierEnv {
 	NETWORK_SECRET: string;
 	LOCAL_PRIVATE_KEY?: string;
 	LOCAL_PUBLIC_KEY?: string;
+	DISABLE_RELAY_DATA?: string;
 	EASYTIER_HOSTNAME?: string;
 	MAX_FRAME_BYTES?: string;
 }
@@ -54,6 +56,9 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 	if (!Number.isSafeInteger(maxFrameBytes) || maxFrameBytes < 1024 || maxFrameBytes > 16_777_216) {
 		throw new Error("MAX_FRAME_BYTES must be an integer between 1024 and 16777216");
 	}
+	// DISABLE_RELAY_DATA=true 时只保留控制面(信令),丢弃节点间数据面转发,
+	// 与上游 EasyTier 的 disable_relay_data / avoid_relay_data 语义一致。
+	const disableRelayData = parseBoolean(env.DISABLE_RELAY_DATA, "DISABLE_RELAY_DATA");
 	const hostname = env.EASYTIER_HOSTNAME ?? "edge";
 	if (
 		typeof hostname !== "string" ||
@@ -69,6 +74,7 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 			networkName,
 			networkSecret,
 			hostname,
+			disableRelayData,
 			maxFrameBytes,
 		};
 	}
@@ -86,8 +92,17 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 		localPrivateKey: privateKey,
 		localPublicKey: publicKey,
 		localPublicKeyBytes: publicBytes,
+		disableRelayData,
 		maxFrameBytes,
 	};
+}
+
+function parseBoolean(value: string | undefined, name: string): boolean {
+	if (value === undefined || value === "") return false;
+	const normalized = value.trim().toLowerCase();
+	if (["true", "1", "yes", "on"].includes(normalized)) return true;
+	if (["false", "0", "no", "off"].includes(normalized)) return false;
+	throw new Error(`${name} must be a boolean (true/false)`);
 }
 
 function requireText(value: string | undefined, name: string): string {

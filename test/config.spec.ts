@@ -61,4 +61,14 @@ describe("readServerConfig", () => {
 			/255 bytes/,
 		);
 	});
+
+	it("parses DISABLE_RELAY_DATA as an optional boolean", () => {
+		expect(readServerConfig(env()).disableRelayData).toBe(false);
+		expect(readServerConfig(env({ DISABLE_RELAY_DATA: "true" })).disableRelayData).toBe(true);
+		expect(readServerConfig(env({ DISABLE_RELAY_DATA: "1" })).disableRelayData).toBe(true);
+		expect(readServerConfig(env({ DISABLE_RELAY_DATA: "false" })).disableRelayData).toBe(false);
+		expect(() => readServerConfig(env({ DISABLE_RELAY_DATA: "maybe" }))).toThrow(
+			/DISABLE_RELAY_DATA/,
+		);
+	});
 });
