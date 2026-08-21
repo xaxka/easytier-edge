@@ -39,12 +39,20 @@ const MAX_CONNECTIONS = 2_048;
  */
 const MAX_PENDING_HANDSHAKES = 256;
 const UNKNOWN_IP = "unknown";
+const IDENTITY_STORAGE_KEY = "secure-identity-v1";
+
+interface StoredIdentity {
+	privateKey: string;
+	publicKey: string;
+}
 
 export class EasyTierServer extends DurableObject<EasyTierEnv> {
+	private readonly doState: DurableObjectState;
 	private readonly config: ServerConfig;
-	private readonly rpc: EasyTierRpc;
-	private readonly localPrivateKey: string;
-	private readonly localPublicKey: string;
+	private rpc!: EasyTierRpc;
+	private localPrivateKey = "";
+	private localPublicKey = "";
+	private identityReady: Promise<void> | null = null;
 	private readonly connections = new Map<WebSocket, Connection>();
 	private readonly rooms = new RoomRegistry();
 	private pendingHandshakes = 0;
@@ -53,25 +61,68 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 
 	constructor(ctx: DurableObjectState, env: EasyTierEnv) {
 		super(ctx, env);
+		this.doState = ctx;
 		this.config = readServerConfig(env);
-		// 未配置密钥时生成临时 X25519 身份(对应 EasyTier secure mode
-		// "同一信任域"场景);在 DO 生命周期内保持不变,重启后自动更换。
-		const generated = this.config.localPrivateKey && this.config.localPublicKey
-			? undefined
-			: parseGeneratedKeypair(generate_keypair());
-		const localPrivateKey = this.config.localPrivateKey ?? generated?.privateKey;
-		const localPublicKey = this.config.localPublicKey ?? generated?.publicKey;
-		if (!localPrivateKey || !localPublicKey) {
+	}
+
+	/**
+	 * 解析服务端 X25519 身份;并发请求共享同一次初始化,失败后允许重试。
+	 */
+	private ensureIdentity(): Promise<void> {
+		this.identityReady ??= this.initIdentity().catch((error: unknown) => {
+			this.identityReady = null;
+			throw error;
+		});
+		return this.identityReady;
+	}
+
+	/**
+	 * 未配置 LOCAL_PRIVATE_KEY / LOCAL_PUBLIC_KEY 时生成 X25519 身份并持久化到
+	 * DO storage。此前每次 DO 重新实例化都会生成全新临时密钥:客户端在首次
+	 * Noise XX 握手后会记住服务端静态公钥,DO 被平台驱逐重启后公钥改变,
+	 * 所有客户端持续报 "peer static pubkey mismatch" 且无法自动恢复。
+	 * 持久化后 DO 重启复用同一身份,已接入客户端无需任何改动。
+	 */
+	private async initIdentity(): Promise<void> {
+		let privateKey = this.config.localPrivateKey;
+		let publicKey = this.config.localPublicKey;
+		if (!privateKey || !publicKey) {
+			const stored = await this.doState.storage.get<StoredIdentity>(IDENTITY_STORAGE_KEY);
+			if (stored && this.isValidKeypair(stored.privateKey, stored.publicKey)) {
+				privateKey = stored.privateKey;
+				publicKey = stored.publicKey;
+			} else {
+				const generated = parseGeneratedKeypair(generate_keypair());
+				privateKey = generated.privateKey;
+				publicKey = generated.publicKey;
+				await this.doState.storage.put(IDENTITY_STORAGE_KEY, {
+					privateKey,
+					publicKey,
+				} satisfies StoredIdentity);
+			}
+		}
+		if (!privateKey || !publicKey) {
 			throw new Error("failed to resolve the secure-mode X25519 keypair");
 		}
-		this.localPrivateKey = localPrivateKey;
-		this.localPublicKey = localPublicKey;
+		this.localPrivateKey = privateKey;
+		this.localPublicKey = publicKey;
 		this.rpc = new EasyTierRpc(
-			this.config.localPublicKeyBytes ?? decodeBase64Key(localPublicKey),
+			this.config.localPublicKeyBytes ?? decodeBase64Key(publicKey),
 			this.config.hostname,
 			SERVER_PEER_ID,
 			this.config.disableRelayData,
 		);
+	}
+
+	private isValidKeypair(privateKey: unknown, publicKey: unknown): boolean {
+		if (typeof privateKey !== "string" || typeof publicKey !== "string") return false;
+		try {
+			decodeBase64Key(privateKey);
+			decodeBase64Key(publicKey);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	async fetch(request: Request): Promise<Response> {
@@ -79,6 +130,16 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		if (url.pathname !== "/") return new Response("Not found", { status: 404 });
 		if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
 			return new Response("Expected a WebSocket upgrade", { status: 426 });
+		}
+		// 身份解析涉及 DO storage 读写,必须在返回 101 之前完成,
+		// 保证消息回调触发时 rpc / 密钥对已就绪。
+		try {
+			await this.ensureIdentity();
+		} catch (error) {
+			console.error("EasyTier secure-mode identity init failed", {
+				error: errorMessage(error),
+			});
+			return new Response("Server secure-mode configuration is invalid", { status: 503 });
 		}
 		// 限流只针对"未完成握手"的连接:认证后的节点可能共享 NAT 出口 IP
 		// (例如家里手机和电脑),按 IP 限制已认证连接会误伤正常节点。
