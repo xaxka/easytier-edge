@@ -200,8 +200,9 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		const packet = parsePacket(frame);
 		switch (connection.phase) {
 			case "msg1":
-				// 首包类型决定握手方式:HandShake(2) 走旧版明文握手,
+				// 首包类型决定握手路径:HandShake(2) 走旧版明文握手,
 				// NoiseHandshakeMsg1(13) 走 Noise XX 安全握手。
+				// CONNECTION_MODE 不允许的路径会被拒绝(两种模式互斥)。
 				if (packet.header.packetType === PacketType.Handshake) {
 					this.handleLegacyHandshake(connection, frame, packet.header);
 					return;

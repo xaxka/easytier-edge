@@ -38,7 +38,7 @@ Durable Object
 - 有界 RPC 分片、事务跟踪和防重放状态
 - 中继链路具备帧大小、跳数和发送容量限制
 - 可选 `DISABLE_RELAY_DATA=true`:仅保留控制面(信令),丢弃节点间数据面转发,并通过 `avoid_relay_data` 特性标志告知节点(对齐上游 EasyTier 的 `disable_relay_data`)
-- 通过 `CONNECTION_MODE` 切换握手方式:`secure`(默认,仅 Noise XX 安全握手)、`legacy`(EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端)、~~`auto`~~(按首包类型自动二选一)。**~~`auto`~~ 存在已知限制:**同一房间内的 secure 与 legacy 节点之间无法建立 p2p——上游 EasyTier secure 客户端经中继发送任何帧前都强制建立端到端 `Noise_IK` 会话,而 legacy 节点没有静态公钥无法应答。同类节点之间 p2p 正常。仅在了解此限制时使用 ~~`auto`~~,否则请显式选择 `secure` 或 `legacy`。
+- 通过 `CONNECTION_MODE` 切换握手方式:`secure`(默认,仅 Noise XX 安全握手)或 `legacy`(EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端)。两种模式不能混用,原因见[为什么两种模式不能混用](#为什么两种模式不能混用)。
 
 ## 部署
 
@@ -86,7 +86,7 @@ EASYTIER_HOSTNAME=edge
 | `DISABLE_RELAY_DATA` | 否 | 默认 `false`。设为 `true` 时仅转发控制面(路由同步、节点发现、打洞协调、Ping/Pong),丢弃节点间数据面转发,并在路由信息中发布 `avoid_relay_data`。 |
 | `MAX_FRAME_BYTES` | 否 | 单帧上限，默认 1 MiB，允许范围为 1 KiB–16 MiB。 |
 | `MAX_PENDING_PER_IP` | 否 | 同一出口 IP 并发未完成握手连接的上限，默认 `17`，允许范围 1–2048。仅限流握手阶段,不影响共享 NAT 出口已认证节点。 |
-| `CONNECTION_MODE` | 否 | 握手方式选择器。`secure`(默认):仅接受 Noise XX 安全握手。`legacy`:仅接受 EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端。legacy 模式下传输层不加密。~~`auto`~~:按首包类型自动接受两种握手。**注意:**~~`auto`~~ 下同一房间内的 secure 与 legacy 节点之间无法建立 p2p(上游 secure 客户端经中继发送的帧要求端到端会话,legacy 节点无法应答),仅同类节点之间可 p2p。建议尽可能显式选择 `secure` 或 `legacy`。 |
+| `CONNECTION_MODE` | 否 | 握手方式选择器。`secure`(默认):仅接受 Noise XX 安全握手。`legacy`:仅接受 EasyTier 2.6.4 旧版明文 `HandShake` 握手,凭网络密码摘要认证,面向无法配置 secure mode 的客户端。legacy 模式下传输层不加密。两种模式不能在同一网络内混用,原因见[为什么两种模式不能混用](#为什么两种模式不能混用)。 |
 
 通过 Wrangler 写入生产凭据：
 
@@ -123,15 +123,9 @@ easytier-core \
 
 服务端按上游 EasyTier 2.6.4 的 `HandShake` 交换流程响应:双方通过交换网络密码摘要(SipHash 分片摘要,常数时间比较)证明网络身份后才允许接入。传输层保持明文(中继不加密流量),因此只要节点全部支持,请优先使用 `secure` 模式。
 
-### ~~`auto`~~ 模式及其 p2p 限制
+### 为什么两种模式不能混用
 
-`CONNECTION_MODE=`~~`auto`~~ 在同一房间内同时接受 secure 和 legacy 握手,按首包类型自动分流。这对混合客户端场景很方便,但存在根本性的 p2p 限制:
-
-> **~~`auto`~~ 房间内 secure 与 legacy 节点之间无法建立 p2p 直连。**只有同类节点对(secure↔secure、legacy↔legacy)能 p2p,混合对只能走中继。
-
-**原因:**上游 EasyTier secure 客户端经中继发送任何帧前都强制建立端到端 `Noise_IK` 会话(`relay_peer_map::send_msg` 强制 `ensure_session`)。legacy 节点不上报静态公钥(`peer_ospf_route::new_updated_self` 在未开 secure mode 时 `noise_static_pubkey` 为空),会话握手必然失败("remote static pubkey not found")。打洞协调 RPC 经中继透明转发,但 secure 侧在会话门槛处丢弃了 legacy 对端的响应,直连永远无法完成。
-
-这是上游 EasyTier 协议层的限制,不是 edge 的 bug。若需同时接入两类客户端且保持完整 p2p,请部署两个网络(一个 `secure`、一个 `legacy`)。
+同一网络只能运行 `secure` 或 `legacy` 其中之一。上游 EasyTier secure 客户端经中继发送任何帧前都强制建立端到端 `Noise_IK` 会话(`relay_peer_map::send_msg` 强制 `ensure_session`),而 legacy 节点不上报静态公钥(`peer_ospf_route::new_updated_self` 在未开 secure mode 时 `noise_static_pubkey` 为空),会话握手必然失败("remote static pubkey not found"),混合节点对之间永远无法建立 p2p 直连。这是上游 EasyTier 协议层的限制。若需同时接入两类客户端,请部署两个网络(一个 `secure`、一个 `legacy`)。
 
 ## 工具链
 

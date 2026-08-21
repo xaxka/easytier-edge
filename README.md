@@ -38,7 +38,7 @@ Packets addressed to the relay are authenticated, decrypted, and processed by th
 - Bounded RPC fragmentation, transaction tracking, and anti-replay state
 - Frame, hop, and outbound-capacity limits on the relay path
 - Optional `DISABLE_RELAY_DATA=true`: keep the control plane (signaling) only, drop peer data-plane forwarding, and advertise the `avoid_relay_data` feature flag to peers (aligned with upstream EasyTier's `disable_relay_data`)
-- Switchable handshake via `CONNECTION_MODE`: `secure` (default, Noise XX only), `legacy` (EasyTier 2.6.4 plaintext `HandShake` with network-secret digest matching, for clients that cannot configure secure mode), or ~~`auto`~~ (accept either, selected by the first packet). **~~`auto`~~ has a known limitation:** secure and legacy peers in the same room cannot establish p2p connections with each other — upstream EasyTier secure clients require an end-to-end `Noise_IK` session for any frame sent through a relay, which legacy peers (no static public key) cannot answer. Same-protocol pairs p2p works normally. Use ~~`auto`~~ only when you understand this trade-off; otherwise pick `secure` or `legacy` explicitly.
+- Switchable handshake via `CONNECTION_MODE`: `secure` (default, Noise XX only) or `legacy` (EasyTier 2.6.4 plaintext `HandShake` with network-secret digest matching, for clients that cannot configure secure mode). The two modes cannot be mixed — see [Why the two modes cannot be mixed](#why-the-two-modes-cannot-be-mixed).
 
 ## Deploy
 
@@ -86,7 +86,7 @@ EASYTIER_HOSTNAME=edge
 | `DISABLE_RELAY_DATA` | No | Defaults to `false`. When `true`, only the control plane (route sync, discovery, hole-punch coordination, ping/pong) is forwarded; peer data-plane forwarding is dropped and `avoid_relay_data` is advertised in route info. |
 | `MAX_FRAME_BYTES` | No | Frame limit; defaults to 1 MiB, allowed range 1 KiB–16 MiB. |
 | `MAX_PENDING_PER_IP` | No | Per-IP cap on concurrent connections that have not finished the handshake; defaults to `17`, allowed range 1–2048. Only throttles handshakes, never authenticated peers behind shared NAT. |
-| `CONNECTION_MODE` | No | Handshake selector. `secure` (default): accept only Noise XX secure handshakes. `legacy`: accept only the EasyTier 2.6.4 plaintext `HandShake` exchange authenticated by the network-secret digest, for clients that cannot configure secure mode. Legacy mode never encrypts the transport. ~~`auto`~~: accept either handshake, selected by the first packet. **Caveat:** under ~~`auto`~~, secure and legacy peers in the same room cannot establish p2p with each other (upstream secure clients require an end-to-end session for relayed frames, which legacy peers cannot answer); only same-protocol pairs can p2p. Prefer `secure` or `legacy` explicitly when possible. |
+| `CONNECTION_MODE` | No | Handshake selector. `secure` (default): accept only Noise XX secure handshakes. `legacy`: accept only the EasyTier 2.6.4 plaintext `HandShake` exchange authenticated by the network-secret digest, for clients that cannot configure secure mode. Legacy mode never encrypts the transport. The two modes cannot be mixed in one network — see [Why the two modes cannot be mixed](#why-the-two-modes-cannot-be-mixed). |
 
 Set production credentials through Wrangler:
 
@@ -123,15 +123,9 @@ easytier-core \
 
 The relay answers the upstream EasyTier 2.6.4 `HandShake` exchange: both sides prove the network identity by exchanging the network-secret digest (SipHash-based, compared in constant time) before admission. The transport stays plaintext — traffic is not encrypted by the relay — so prefer `secure` mode whenever every peer supports it.
 
-### ~~`auto`~~ mode and its p2p limitation
+### Why the two modes cannot be mixed
 
-`CONNECTION_MODE=`~~`auto`~~ accepts both secure and legacy handshakes in the same room, selected by the first packet. This is convenient for mixed-client fleets but has a fundamental p2p limitation:
-
-> **Secure and legacy peers in the same ~~`auto`~~ room cannot establish direct p2p connections with each other.** Only same-protocol pairs (secure↔secure, legacy↔legacy) can p2p. Mixed pairs fall back to relay-only.
-
-**Why:** upstream EasyTier secure clients require an end-to-end `Noise_IK` session before sending any frame through a relay (`relay_peer_map::send_msg` forces `ensure_session`). Legacy peers do not publish a static public key (`peer_ospf_route::new_updated_self` leaves `noise_static_pubkey` empty when secure mode is off), so the session handshake always fails with "remote static pubkey not found." The hole-punch coordination RPC is relayed transparently, but the secure side drops the legacy peer's responses at the session gate, so direct connections never complete.
-
-This is an upstream EasyTier protocol constraint, not an edge bug. If you need both client types with full p2p, run two separate networks (one `secure`, one `legacy`).
+A single network must run either `secure` or `legacy` — never both. Upstream EasyTier secure clients require an end-to-end `Noise_IK` session before sending any frame through a relay (`relay_peer_map::send_msg` forces `ensure_session`). Legacy peers do not publish a static public key (`peer_ospf_route::new_updated_self` leaves `noise_static_pubkey` empty when secure mode is off), so the session handshake always fails with "remote static pubkey not found," and mixed pairs can never establish direct p2p connections. This is an upstream EasyTier protocol constraint. If you need both client types, run two separate networks (one `secure`, one `legacy`).
 
 ## Toolchain
 
