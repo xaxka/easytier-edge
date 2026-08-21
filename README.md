@@ -29,7 +29,7 @@ Packets addressed to the relay are authenticated, decrypted, and processed by th
 
 - One private EasyTier network behind a `wss://` endpoint (private-mode semantics enforced: only peers with the same network identity are admitted)
 - Noise XX authentication with network-secret proof
-- Optional server keys: an ephemeral X25519 identity is generated at startup when none is configured (the official secure-mode "same trust domain" scenario)
+- Optional server keys: when none is configured, an X25519 identity is generated once and persisted in Durable Object storage, surviving restarts (the official secure-mode "same trust domain" scenario)
 - AES-GCM and ChaCha20-Poly1305 authenticated encryption
 - OSPF route synchronization and PeerCenter discovery
 - Client-to-client UDP/TCP hole-punch coordination through forwarded EasyTier RPC
@@ -49,7 +49,7 @@ The deployment requires two secrets:
 - `NETWORK_NAME`
 - `NETWORK_SECRET`
 
-The server X25519 keypair (`LOCAL_PRIVATE_KEY` / `LOCAL_PUBLIC_KEY`) is optional: without it an ephemeral identity is generated on each startup and peers need no keys at all. Run `pnpm run keys` only if you want a pinned identity that clients can lock onto via `peer_public_key`.
+The server X25519 keypair (`LOCAL_PRIVATE_KEY` / `LOCAL_PUBLIC_KEY`) is optional: without it an identity is generated on first use, persisted in Durable Object storage, and kept stable across restarts, so peers need no keys at all. Run `pnpm run keys` only if you want a pinned identity that clients can lock onto via `peer_public_key`.
 
 ## Local development
 
@@ -80,7 +80,7 @@ EASYTIER_HOSTNAME=edge
 | --- | --- | --- |
 | `NETWORK_NAME` | Yes | Network name; non-empty, at most 255 UTF-8 bytes. |
 | `NETWORK_SECRET` | Yes | Network secret; non-empty. Must match on every peer. |
-| `LOCAL_PRIVATE_KEY` | No | Base64-encoded 32-byte X25519 private key. An ephemeral key is generated when omitted. |
+| `LOCAL_PRIVATE_KEY` | No | Base64-encoded 32-byte X25519 private key. When omitted, a key is generated once and persisted in Durable Object storage. |
 | `LOCAL_PUBLIC_KEY` | No | Matching Base64-encoded 32-byte X25519 public key. Must be set together with the private key. |
 | `EASYTIER_HOSTNAME` | No | Advertised hostname; defaults to `edge`, maximum 255 UTF-8 bytes. |
 | `DISABLE_RELAY_DATA` | No | Defaults to `false`. When `true`, only the control plane (route sync, discovery, hole-punch coordination, ping/pong) is forwarded; peer data-plane forwarding is dropped and `avoid_relay_data` is advertised in route info. |

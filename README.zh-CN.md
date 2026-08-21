@@ -29,7 +29,7 @@ Durable Object
 
 - 单个 `wss://` 入口承载一个私有 EasyTier 网络(强制 private-mode 语义:仅接受相同网络身份的节点)
 - Noise XX 握手与网络密码证明
-- 服务端密钥可选:未配置时自动生成临时 X25519 身份(对应官方 secure mode "同一信任域"场景)
+- 服务端密钥可选:未配置时自动生成 X25519 身份并持久化到 Durable Object storage,重启后保持不变(对应官方 secure mode "同一信任域"场景)
 - AES-GCM、ChaCha20-Poly1305 认证加密
 - OSPF 路由同步与 PeerCenter 节点发现
 - 通过转发 EasyTier RPC 协调客户端之间的 UDP/TCP 打洞
@@ -49,7 +49,7 @@ Durable Object
 - `NETWORK_NAME`
 - `NETWORK_SECRET`
 
-服务端 X25519 密钥对(`LOCAL_PRIVATE_KEY` / `LOCAL_PUBLIC_KEY`)是可选的:不配置时每次启动自动生成临时身份,节点接入无需任何密钥。若希望通过 `peer_public_key` 锁定服务端身份,可运行 `pnpm run keys` 生成并配置固定密钥。
+服务端 X25519 密钥对(`LOCAL_PRIVATE_KEY` / `LOCAL_PUBLIC_KEY`)是可选的:不配置时会在首次使用时自动生成身份,持久化到 Durable Object storage 并跨重启保持稳定,节点接入无需任何密钥。若希望通过 `peer_public_key` 锁定服务端身份,可运行 `pnpm run keys` 生成并配置固定密钥。
 
 ## 本地开发
 
@@ -80,7 +80,7 @@ EASYTIER_HOSTNAME=edge
 | --- | --- | --- |
 | `NETWORK_NAME` | 是 | 网络名称，非空且不超过 255 个 UTF-8 字节。 |
 | `NETWORK_SECRET` | 是 | 网络密码，非空。所有节点必须一致。 |
-| `LOCAL_PRIVATE_KEY` | 否 | Base64 编码的 32 字节 X25519 私钥。未配置时自动生成临时密钥。 |
+| `LOCAL_PRIVATE_KEY` | 否 | Base64 编码的 32 字节 X25519 私钥。未配置时自动生成一次并持久化到 Durable Object storage。 |
 | `LOCAL_PUBLIC_KEY` | 否 | 与私钥匹配的 Base64 编码 32 字节 X25519 公钥。与私钥必须成对配置。 |
 | `EASYTIER_HOSTNAME` | 否 | 对外发布的 hostname，默认 `edge`，最大 255 个 UTF-8 字节。 |
 | `DISABLE_RELAY_DATA` | 否 | 默认 `false`。设为 `true` 时仅转发控制面(路由同步、节点发现、打洞协调、Ping/Pong),丢弃节点间数据面转发,并在路由信息中发布 `avoid_relay_data`。 |

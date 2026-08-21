@@ -54,7 +54,8 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 		[networkName, { network_secret: networkSecret }],
 	]);
 
-	// 密钥对是可选的:未配置时服务端会在启动时生成临时 X25519 密钥,
+	// 密钥对是可选的:未配置时服务端会在首次使用时生成 X25519 密钥,
+	// 并持久化到 Durable Object storage,跨重启保持稳定,
 	// 对应 EasyTier 官方 secure mode "同一信任域" 场景,
 	// 节点只需 --network-name / --network-secret / --secure-mode 即可接入。
 	const hasPrivateKey = Boolean(env.LOCAL_PRIVATE_KEY);

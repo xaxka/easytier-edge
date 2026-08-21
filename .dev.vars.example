@@ -6,7 +6,8 @@ NETWORK_SECRET=use-a-long-random-secret
 # 默认值见 wrangler.jsonc 的 vars(部署向导中可直接修改):
 # DISABLE_RELAY_DATA=false
 
-# 可选:固定服务端 X25519 身份(不配置则每次启动自动生成临时密钥)。
+# 可选:固定服务端 X25519 身份(不配置则自动生成一次并持久化到
+# Durable Object storage,重启后保持不变)。
 # 仅当希望客户端通过 peer_public_key 锁定本服务端身份时才需要设置。
 # LOCAL_PRIVATE_KEY=base64-encoded-32-byte-x25519-private-key
 # LOCAL_PUBLIC_KEY=base64-encoded-32-byte-x25519-public-key

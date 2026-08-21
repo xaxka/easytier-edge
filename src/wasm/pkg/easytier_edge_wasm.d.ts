@@ -57,8 +57,9 @@ export function build_legacy_handshake_response(server_peer_id: number, network_
 export function build_packet(from_peer_id: number, to_peer_id: number, packet_type: number, payload: Uint8Array): Uint8Array;
 
 /**
- * 生成一对临时 X25519 密钥。
- * 未配置 LOCAL_PRIVATE_KEY / LOCAL_PUBLIC_KEY 时由服务端在启动时调用,
+ * 生成一对 X25519 密钥。
+ * 未配置 LOCAL_PRIVATE_KEY / LOCAL_PUBLIC_KEY 时由服务端在首次使用时调用,
+ * 生成结果由服务端持久化到 Durable Object storage,跨重启复用。
  * 与 EasyTier 官方"同一信任域"场景保持一致:握手仍为 Noise XX,
  * 身份认证完全依赖 network_secret 证明。
  */

@@ -216,8 +216,9 @@ struct GeneratedKeypair {
     public_key_base64: String,
 }
 
-/// 生成一对临时 X25519 密钥。
-/// 未配置 LOCAL_PRIVATE_KEY / LOCAL_PUBLIC_KEY 时由服务端在启动时调用,
+/// 生成一对 X25519 密钥。
+/// 未配置 LOCAL_PRIVATE_KEY / LOCAL_PUBLIC_KEY 时由服务端在首次使用时调用,
+/// 生成结果由服务端持久化到 Durable Object storage,跨重启复用。
 /// 与 EasyTier 官方"同一信任域"场景保持一致:握手仍为 Noise XX,
 /// 身份认证完全依赖 network_secret 证明。
 #[wasm_bindgen]
