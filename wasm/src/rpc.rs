@@ -105,7 +105,9 @@ impl WasmRpcCore {
         self.avoid_relay_data = enabled;
         let groups: Vec<String> = self.configured_groups.iter().cloned().collect();
         for group in groups {
-            self.routes.set_my_avoid_relay_data(&group, enabled)?;
+            self.routes
+                .set_my_avoid_relay_data(&group, enabled)
+                .map_err(|e| error(&e))?;
         }
         Ok(())
     }
@@ -116,14 +118,20 @@ impl WasmRpcCore {
         peer_id: u32,
         remote_public_key: &[u8],
     ) -> Result<(), JsValue> {
-        self.routes.add_peer(network, peer_id, remote_public_key)?;
+        self.routes
+            .add_peer(network, peer_id, remote_public_key)
+            .map_err(|e| error(&e))?;
         if self.configured_groups.insert(network.to_string()) {
             self.routes
-                .set_my_info_field(network, "hostname", &self.hostname)?;
+                .set_my_info_field(network, "hostname", &self.hostname)
+                .map_err(|e| error(&e))?;
             self.routes
-                .set_my_noise_public_key(network, &self.public_key)?;
+                .set_my_noise_public_key(network, &self.public_key)
+                .map_err(|e| error(&e))?;
             if self.avoid_relay_data {
-                self.routes.set_my_avoid_relay_data(network, true)?;
+                self.routes
+                    .set_my_avoid_relay_data(network, true)
+                    .map_err(|e| error(&e))?;
             }
         }
         self.peer_initiator
@@ -192,12 +200,15 @@ impl WasmRpcCore {
                     (network.to_string(), authenticated_peer_id),
                     we_are_initiator,
                 );
-                let outcome = self.routes.handle_sync_route_info_request(
-                    network,
-                    authenticated_peer_id,
-                    &request.request,
-                    now_ms,
-                )?;
+                let outcome = self
+                    .routes
+                    .handle_sync_route_info_request(
+                        network,
+                        authenticated_peer_id,
+                        &request.request,
+                        now_ms,
+                    )
+                    .map_err(|e| error(&e))?;
                 let result = if outcome.route_changed {
                     RESULT_ROUTE
                 } else if outcome.session_changed {
@@ -353,14 +364,17 @@ impl WasmRpcCore {
             payload,
             peer_info_versions,
             topology_version,
-        } = self.routes.build_sync_route_info_request(
-            network,
-            peer_id,
-            server_session_id,
-            we_are_initiator,
-            force_full,
-            now_ms,
-        )?;
+        } = self
+            .routes
+            .build_sync_route_info_request(
+                network,
+                peer_id,
+                server_session_id,
+                we_are_initiator,
+                force_full,
+                now_ms,
+            )
+            .map_err(|e| error(&e))?;
         let transaction_id = self.next_transaction_id(network, peer_id)?;
         let descriptor = RpcDescriptor {
             domain_name: network.to_string(),

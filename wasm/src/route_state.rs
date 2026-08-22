@@ -1,7 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
 use prost::Message;
-use wasm_bindgen::JsValue;
 
 use crate::proto::peer_rpc::{
     PeerIdVersion, RouteConnBitmap, RouteConnPeerList, RoutePeerInfo, SyncRouteInfoRequest,
@@ -186,13 +185,14 @@ impl RouteState {
         group_key: &str,
         peer_id: PeerId,
         public_key: &[u8],
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), String> {
         // legacy 握手的节点没有 Noise 静态公钥,以空键表示;
         // secure 模式节点必须提供 32 字节公钥。
         if !public_key.is_empty() && public_key.len() != 32 {
-            return Err(JsValue::from_str(
-                "authenticated peer public key must be 32 bytes or empty for legacy peers",
-            ));
+            return Err(
+                "authenticated peer public key must be 32 bytes or empty for legacy peers"
+                    .to_string(),
+            );
         }
         let public_key = public_key.to_vec();
         let my_peer_id = self.my_peer_id;
@@ -201,9 +201,7 @@ impl RouteState {
             .get(&peer_id)
             .is_some_and(|current| current.as_slice() != public_key.as_slice())
         {
-            return Err(JsValue::from_str(
-                "peer id is already bound to another authenticated public key",
-            ));
+            return Err("peer id is already bound to another authenticated public key".to_string());
         }
         g.authenticated_peer_keys.insert(peer_id, public_key);
         let is_new = g.peers.insert(peer_id);
@@ -325,22 +323,22 @@ impl RouteState {
         group_key: &str,
         field: &str,
         value: &str,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), String> {
         let g = self.ensure_group(group_key);
         match field {
             "hostname" => g.my_info.hostname = Some(value.to_string()),
             "network_length" => {
                 g.my_info.network_length = value
                     .parse()
-                    .map_err(|_| JsValue::from_str("invalid network_length"))?;
+                    .map_err(|_| "invalid network_length".to_string())?;
             }
             "ipv4_addr" => {
                 let addr: u32 = value
                     .parse()
-                    .map_err(|_| JsValue::from_str("invalid ipv4_addr"))?;
+                    .map_err(|_| "invalid ipv4_addr".to_string())?;
                 g.my_info.ipv4_addr = Some(crate::proto::common::Ipv4Addr { addr });
             }
-            _ => return Err(JsValue::from_str("unknown field")),
+            _ => return Err("unknown field".to_string()),
         }
         g.my_info_version += 1;
         g.my_info.version = g.my_info_version;
@@ -352,9 +350,9 @@ impl RouteState {
         &mut self,
         group_key: &str,
         public_key: &[u8],
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), String> {
         if public_key.len() != 32 {
-            return Err(JsValue::from_str("Noise public key must be 32 bytes"));
+            return Err("Noise public key must be 32 bytes".to_string());
         }
         let g = self.ensure_group(group_key);
         g.my_info.noise_static_pubkey = public_key.to_vec();
@@ -369,7 +367,7 @@ impl RouteState {
         &mut self,
         group_key: &str,
         enabled: bool,
-    ) -> Result<(), JsValue> {
+    ) -> Result<(), String> {
         let g = self.ensure_group(group_key);
         let feature_flag = g
             .my_info
@@ -393,7 +391,7 @@ impl RouteState {
         we_are_initiator: bool,
         force_full: bool,
         now_ms: u64,
-    ) -> Result<RouteUpdate, JsValue> {
+    ) -> Result<RouteUpdate, String> {
         let my_peer_id = self.my_peer_id;
         let g = self.ensure_group(group_key);
 
@@ -514,15 +512,15 @@ impl RouteState {
         from_peer_id: PeerId,
         request_bytes: &[u8],
         now_ms: u64,
-    ) -> Result<RouteSyncOutcome, JsValue> {
+    ) -> Result<RouteSyncOutcome, String> {
         let my_peer_id = self.my_peer_id;
-        let req = SyncRouteInfoRequest::decode(request_bytes).map_err(|e| {
-            JsValue::from_str(&format!("decode SyncRouteInfoRequest failed: {}", e))
-        })?;
+        let req = SyncRouteInfoRequest::decode(request_bytes)
+            .map_err(|e| format!("decode SyncRouteInfoRequest failed: {}", e))?;
         if req.my_peer_id != from_peer_id {
-            return Err(JsValue::from_str(
-                "SyncRouteInfoRequest peer id does not match the authenticated connection",
-            ));
+            return Err(
+                "SyncRouteInfoRequest peer id does not match the authenticated connection"
+                    .to_string(),
+            );
         }
 
         // 与解码结果同序的原始条目字节,用于第三方路由的保真转播。
@@ -563,21 +561,20 @@ impl RouteState {
                     if !g.peer_infos.contains_key(&info.peer_id)
                         && Self::relayed_peer_count(g) >= MAX_RELAYED_PEERS
                     {
-                        return Err(JsValue::from_str("relayed route capacity exceeded"));
+                        return Err("relayed route capacity exceeded".to_string());
                     }
                 }
                 if is_self {
-                    let authenticated_key =
-                        g.authenticated_peer_keys
-                            .get_mut(&from_peer_id)
-                            .ok_or_else(|| {
-                                JsValue::from_str("route peer has no authenticated public key")
-                            })?;
+                    let authenticated_key = g
+                        .authenticated_peer_keys
+                        .get_mut(&from_peer_id)
+                        .ok_or_else(|| {
+                            "route peer has no authenticated public key".to_string()
+                        })?;
                     validate_or_bind_reported_key(
                         authenticated_key,
                         &info.noise_static_pubkey,
-                    )
-                    .map_err(|e| JsValue::from_str(&e))?;
+                    )?;
                 } else {
                     Self::bind_third_party_key(g, info)?;
                 }
@@ -684,7 +681,7 @@ impl RouteState {
 
     /// 绑定第三方节点的公钥。实例变更(节点重启换密钥)允许重新绑定,
     /// 同一实例内的密钥漂移视为身份攻击而被拒绝。
-    fn bind_third_party_key(g: &mut RouteGroupData, info: &RoutePeerInfo) -> Result<(), JsValue> {
+    fn bind_third_party_key(g: &mut RouteGroupData, info: &RoutePeerInfo) -> Result<(), String> {
         let binding = g
             .authenticated_peer_keys
             .entry(info.peer_id)
@@ -695,17 +692,17 @@ impl RouteState {
                 .get(&info.peer_id)
                 .is_some_and(|current| current.inst_id != info.inst_id);
             if !instance_changed {
-                return Err(JsValue::from_str(
-                    "relayed RoutePeerInfo public key does not match the bound Noise identity",
-                ));
+                return Err(
+                    "relayed RoutePeerInfo public key does not match the bound Noise identity"
+                        .to_string(),
+                );
             }
             g.authenticated_peer_keys.insert(info.peer_id, Vec::new());
             let binding = g
                 .authenticated_peer_keys
                 .get_mut(&info.peer_id)
                 .expect("rebinding entry was just inserted");
-            validate_or_bind_reported_key(binding, &info.noise_static_pubkey)
-                .map_err(|e| JsValue::from_str(&e))?;
+            validate_or_bind_reported_key(binding, &info.noise_static_pubkey)?;
         }
         Ok(())
     }
@@ -806,7 +803,7 @@ impl RouteState {
         supports_conn_list: bool,
         my_peer_id: PeerId,
         now_ms: u64,
-    ) -> Result<Option<ConnInfo>, JsValue> {
+    ) -> Result<Option<ConnInfo>, String> {
         if relevant_peers.is_empty() {
             return Ok(None);
         }
@@ -859,9 +856,10 @@ impl RouteState {
         }
 
         if n > MAX_LEGACY_BITMAP_PEERS {
-            return Err(JsValue::from_str(
-                "peer does not support sparse route synchronization and the legacy bitmap limit was exceeded",
-            ));
+            return Err(
+                "peer does not support sparse route synchronization and the legacy bitmap limit was exceeded"
+                    .to_string(),
+            );
         }
         let bitmap_size = (n * n + 7) / 8;
         let mut bitmap = vec![0u8; bitmap_size];
