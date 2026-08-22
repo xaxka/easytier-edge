@@ -4,9 +4,8 @@ use prost::Message;
 use wasm_bindgen::JsValue;
 
 use crate::proto::peer_rpc::{
-    PeerIdVersion, RouteConnBitmap, RouteConnPeerList, RoutePeerInfo, RoutePeerInfos,
-    SyncRouteInfoRequest, SyncRouteInfoResponse, route_conn_peer_list,
-    sync_route_info_request::ConnInfo,
+    PeerIdVersion, RouteConnBitmap, RouteConnPeerList, RoutePeerInfo, SyncRouteInfoRequest,
+    SyncRouteInfoResponse, route_conn_peer_list, sync_route_info_request::ConnInfo,
 };
 
 pub type PeerId = u32;
@@ -616,9 +615,10 @@ impl RouteState {
                     seconds: (now_ms / 1000) as i64,
                     nanos: 0,
                 });
-                g.peer_infos.insert(info.peer_id, info);
+                let entry_peer_id = info.peer_id;
+                g.peer_infos.insert(entry_peer_id, info);
                 if let Some(raw) = raw_items.get(index) {
-                    g.raw_peer_infos.insert(info.peer_id, raw.clone());
+                    g.raw_peer_infos.insert(entry_peer_id, raw.clone());
                 }
                 if is_new {
                     need_bump = true;
@@ -985,10 +985,11 @@ fn extract_route_peer_info_items(request_bytes: &[u8]) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnInfo, PeerId, PeerIdVersion, RouteConnPeerList, RoutePeerInfo, RoutePeerInfos,
-        RouteState, SyncRouteInfoRequest, extract_route_peer_info_items, push_len_delimited,
-        push_varint, read_varint, route_conn_peer_list, validate_or_bind_reported_key,
+        ConnInfo, PeerId, PeerIdVersion, RouteConnPeerList, RoutePeerInfo, RouteState,
+        SyncRouteInfoRequest, extract_route_peer_info_items, push_len_delimited, push_varint,
+        read_varint, route_conn_peer_list, validate_or_bind_reported_key,
     };
+    use crate::proto::peer_rpc::RoutePeerInfos;
     use prost::Message;
 
     const KEY_A: [u8; 32] = [0x11; 32];
