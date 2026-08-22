@@ -149,6 +149,12 @@ impl WasmRpcCore {
             .retain(|key, _| key.network != network || key.peer_id != peer_id);
     }
 
+    /// 查询到达目标节点的下一跳网关(链式接入)。
+    /// 返回 0 表示目标不可达;直连节点返回其自身。
+    pub fn get_next_hop(&self, network: &str, peer_id: u32) -> u32 {
+        self.routes.get_next_hop(network, peer_id).unwrap_or(0)
+    }
+
     pub fn handle_request(
         &mut self,
         network: &str,
@@ -190,6 +196,7 @@ impl WasmRpcCore {
                     network,
                     authenticated_peer_id,
                     &request.request,
+                    now_ms,
                 )?;
                 let result = if outcome.route_changed {
                     RESULT_ROUTE
@@ -316,12 +323,14 @@ impl WasmRpcCore {
             authenticated_peer_id,
             sync.session_id,
             we_are_initiator,
+            now_ms,
         );
         self.routes.commit_route_update(
             network,
             authenticated_peer_id,
             &outstanding.peer_info_versions,
             outstanding.topology_version,
+            now_ms,
         );
         Ok(true)
     }
@@ -350,6 +359,7 @@ impl WasmRpcCore {
             server_session_id,
             we_are_initiator,
             force_full,
+            now_ms,
         )?;
         let transaction_id = self.next_transaction_id(network, peer_id)?;
         let descriptor = RpcDescriptor {

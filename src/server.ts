@@ -333,8 +333,16 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			// DISABLE_RELAY_DATA=true:丢弃节点间数据面流量,仅保留控制面(信令)转发。
 			// 对端已通过路由同步中的 avoid_relay_data 特性标志得知本中继不承载数据。
 			if (this.config.disableRelayData && isRelayDataPacket(frame)) return;
-			const target = this.findPeer(connection.networkName, header.toPeerId);
-			if (!target || target.phase !== "ready") return;
+			const target = this.resolveRecipient(connection.networkName, header.toPeerId);
+			if (!target) {
+				console.warn("EasyTier no route to peer", {
+					networkName: connection.networkName,
+					fromPeerId: connection.peerId,
+					toPeerId: header.toPeerId,
+					packetType: header.packetType,
+				});
+				return;
+			}
 			const forwarded = incrementForwardCounter(frame);
 			try {
 				target.send(forwarded);
@@ -435,6 +443,23 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 
 	private findPeer(networkName: string, peerId: number): Connection | undefined {
 		return this.rooms.get(networkName, peerId);
+	}
+
+	/**
+	 * 选择帧的实际投递目标:目标直连时直接投递;目标是链式接入节点
+	 * (经网关 B 间接接入)时投递给网关,由其客户端侧转发。
+	 * 数据面帧在进入本方法前已被 DISABLE_RELAY_DATA 过滤,
+	 * 因此这里的网关转发只承载控制面(信令)流量。
+	 */
+	private resolveRecipient(networkName: string, toPeerId: number): Connection | undefined {
+		const direct = this.findPeer(networkName, toPeerId);
+		if (direct) {
+			return direct.phase === "ready" ? direct : undefined;
+		}
+		const gatewayId = this.rpc.getNextHop(networkName, toPeerId);
+		if (gatewayId === 0 || gatewayId === toPeerId) return undefined;
+		const gateway = this.findPeer(networkName, gatewayId);
+		return gateway && gateway.phase === "ready" ? gateway : undefined;
 	}
 
 	private scheduleMaintenance(): void {

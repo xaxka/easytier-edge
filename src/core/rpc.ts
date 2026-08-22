@@ -54,6 +54,11 @@ export class EasyTierRpc {
 		this.routeSyncStates.delete(routeSyncKey(peer));
 	}
 
+	/** 查询链式接入节点的下一跳网关;返回 0 表示不可达。 */
+	getNextHop(networkName: string, peerId: number): number {
+		return this.core.get_next_hop(networkName, peerId);
+	}
+
 	cleanExpired(now: number): RouteSyncFailure[] {
 		this.core.clean_expired(BigInt(now));
 		const failures: RouteSyncFailure[] = [];

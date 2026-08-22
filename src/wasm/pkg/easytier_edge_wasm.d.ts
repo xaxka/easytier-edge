@@ -39,6 +39,11 @@ export class WasmRpcCore {
     clean_expired(now_ms: bigint): void;
     handle_request(network: string, authenticated_peer_id: number, payload: Uint8Array, now_ms: bigint): Uint8Array;
     handle_response(network: string, authenticated_peer_id: number, payload: Uint8Array, now_ms: bigint): boolean;
+    /**
+     * 查询到达目标节点的下一跳网关(链式接入)。
+     * 返回 0 表示目标不可达;直连节点返回其自身。
+     */
+    get_next_hop(network: string, peer_id: number): number;
     constructor(public_key: Uint8Array, hostname: string, server_peer_id: number);
     remove_peer(network: string, peer_id: number): void;
     /**
