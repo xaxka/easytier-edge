@@ -40,6 +40,7 @@ const MAX_CONNECTIONS = 2_048;
 const MAX_PENDING_HANDSHAKES = 256;
 const UNKNOWN_IP = "unknown";
 const IDENTITY_STORAGE_KEY = "secure-identity-v1";
+const ROUTE_ID_STORAGE_PREFIX = "route-id-v1:";
 
 interface StoredIdentity {
 	privateKey: string;
@@ -53,6 +54,7 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 	private localPrivateKey = "";
 	private localPublicKey = "";
 	private identityReady: Promise<void> | null = null;
+	private readonly persistedRouteIds = new Set<string>();
 	private readonly connections = new Map<WebSocket, Connection>();
 	private readonly rooms = new RoomRegistry();
 	private pendingHandshakes = 0;
@@ -112,6 +114,32 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			SERVER_PEER_ID,
 			this.config.disableRelayData,
 		);
+		await this.restoreRouteIds();
+	}
+
+	/**
+	 * 恢复各网络持久化的 peer_route_id。
+	 *
+	 * 上游服务进程长驻,my_peer_route_id 在进程生命周期内稳定;本服务
+	 * 跑在 Durable Object 上,平台驱逐/重置会重新实例化 DO,此前每次
+	 * 实例化都重新随机 route_id,导致客户端缓存的服务端路由条目与新
+	 * 实例冲突、触发对端错误并进入重连死循环。持久化到 DO storage 后
+	 * DO 重启复用同一 route_id,与上游语义对齐。
+	 */
+	private async restoreRouteIds(): Promise<void> {
+		const stored = await this.doState.storage.list<string>({
+			prefix: ROUTE_ID_STORAGE_PREFIX,
+		});
+		for (const [key, routeId] of stored) {
+			const networkName = key.slice(ROUTE_ID_STORAGE_PREFIX.length);
+			if (!networkName || typeof routeId !== "string") continue;
+			try {
+				this.rpc.setPeerRouteId(networkName, routeId);
+				this.persistedRouteIds.add(networkName);
+			} catch {
+				// 无效记录忽略:首次注册时会重新生成并覆盖。
+			}
+		}
 	}
 
 	private isValidKeypair(privateKey: unknown, publicKey: unknown): boolean {
@@ -333,8 +361,16 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			// DISABLE_RELAY_DATA=true:丢弃节点间数据面流量,仅保留控制面(信令)转发。
 			// 对端已通过路由同步中的 avoid_relay_data 特性标志得知本中继不承载数据。
 			if (this.config.disableRelayData && isRelayDataPacket(frame)) return;
-			const target = this.findPeer(connection.networkName, header.toPeerId);
-			if (!target || target.phase !== "ready") return;
+			const target = this.resolveRecipient(connection.networkName, header.toPeerId);
+			if (!target) {
+				console.warn("EasyTier no route to peer", {
+					networkName: connection.networkName,
+					fromPeerId: connection.peerId,
+					toPeerId: header.toPeerId,
+					packetType: header.packetType,
+				});
+				return;
+			}
 			const forwarded = incrementForwardCounter(frame);
 			try {
 				target.send(forwarded);
@@ -397,6 +433,23 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			this.close(replaced, 4000, "replaced by an authenticated reconnect");
 		}
 		this.rpc.addPeer(connection);
+		this.persistPeerRouteId(connection.networkName);
+	}
+
+	/** 首次见到某网络时把生成的 peer_route_id 持久化到 DO storage。 */
+	private persistPeerRouteId(networkName: string): void {
+		if (!networkName || this.persistedRouteIds.has(networkName)) return;
+		this.persistedRouteIds.add(networkName);
+		const routeId = this.rpc.getPeerRouteId(networkName);
+		void this.doState.storage
+			.put(ROUTE_ID_STORAGE_PREFIX + networkName, routeId)
+			.catch((error: unknown) => {
+				console.error("failed to persist peer route id", {
+					networkName,
+					error: errorMessage(error),
+				});
+				this.persistedRouteIds.delete(networkName);
+			});
 	}
 
 	private removeConnection(connection: Connection): void {
@@ -435,6 +488,23 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 
 	private findPeer(networkName: string, peerId: number): Connection | undefined {
 		return this.rooms.get(networkName, peerId);
+	}
+
+	/**
+	 * 选择帧的实际投递目标:目标直连时直接投递;目标是链式接入节点
+	 * (经网关 B 间接接入)时投递给网关,由其客户端侧转发。
+	 * 数据面帧在进入本方法前已被 DISABLE_RELAY_DATA 过滤,
+	 * 因此这里的网关转发只承载控制面(信令)流量。
+	 */
+	private resolveRecipient(networkName: string, toPeerId: number): Connection | undefined {
+		const direct = this.findPeer(networkName, toPeerId);
+		if (direct) {
+			return direct.phase === "ready" ? direct : undefined;
+		}
+		const gatewayId = this.rpc.getNextHop(networkName, toPeerId);
+		if (gatewayId === 0 || gatewayId === toPeerId) return undefined;
+		const gateway = this.findPeer(networkName, gatewayId);
+		return gateway && gateway.phase === "ready" ? gateway : undefined;
 	}
 
 	private scheduleMaintenance(): void {
