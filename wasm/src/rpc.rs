@@ -223,6 +223,11 @@ impl WasmRpcCore {
                 // 失败都只是可容忍的数据问题,写入 SyncRouteInfoResponse.
                 // error 返回,连接保持存活。绝不向 JS 抛错触发
                 // failConnection/close(4401)。
+                //
+                // 错误一律映射为 Stopped:上游客户端对 Stopped 的处理是
+                // 清理 initiator 状态或记日志后重试;而 DuplicatePeerId
+                // 会让非 public-server 的上游客户端直接 panic 崩溃
+                // (peer_ospf_route.rs handle_response 分支),绝不能返回。
                 let outcome = match self.routes.handle_sync_route_info_request(
                     network,
                     authenticated_peer_id,
@@ -232,7 +237,7 @@ impl WasmRpcCore {
                     Ok(outcome) => outcome,
                     Err(_route_error) => RouteSyncOutcome {
                         response: SyncRouteInfoResponse {
-                            error: Some(SyncRouteInfoError::DuplicatePeerId as i32),
+                            error: Some(SyncRouteInfoError::Stopped as i32),
                             ..Default::default()
                         }
                         .encode_to_vec(),
