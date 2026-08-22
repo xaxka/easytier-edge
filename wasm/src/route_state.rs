@@ -1227,7 +1227,9 @@ mod tests {
     }
 
     #[test]
-    fn instance_change_rebinds_third_party_key() {
+    fn instance_change_keeps_first_seen_binding() {
+        // 首见绑定仅信息性:同一 peer_id 换实例(重启换密钥)后路由更新
+        // 照常接受,绑定保留首个值,不再重绑也不拒绝。
         let mut s = RouteState::new(SERVER_ID);
         s.add_peer("net", GATEWAY_B, &[]).unwrap();
         let first = sync_req(
@@ -1237,19 +1239,26 @@ mod tests {
         );
         s.handle_sync_route_info_request("net", GATEWAY_B, &first, 1_000)
             .unwrap();
-        // 同一 peer_id 换实例(重启换密钥)允许重新绑定。
         let rotated = sync_req(
             GATEWAY_B,
             vec![peer_info(CHAINED_C, 5, &key(0x77), 2)],
             None,
         );
-        s.handle_sync_route_info_request("net", GATEWAY_B, &rotated, 2_000)
+        let outcome = s
+            .handle_sync_route_info_request("net", GATEWAY_B, &rotated, 2_000)
             .unwrap();
+        assert!(outcome.route_changed);
         let g = s.groups.get("net").unwrap();
+        // 新实例、新版本的路由条目照常写入。
+        assert!(g
+            .peer_infos
+            .get(&CHAINED_C)
+            .is_some_and(|info| info.version == 5));
+        // 绑定保留首见值。
         assert!(g
             .authenticated_peer_keys
             .get(&CHAINED_C)
-            .is_some_and(|k| k == &key(0x77)));
+            .is_some_and(|k| k == &key(0x33)));
     }
 
     #[test]
