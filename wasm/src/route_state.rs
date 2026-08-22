@@ -57,6 +57,18 @@ const SAVED_ROUTE_VERSION_TTL_MS: u64 = 60_000;
 /// 防止已认证节点用伪造路由撑爆内存。
 const MAX_RELAYED_PEERS: usize = 4_096;
 
+/// 单个节点的连接行:该节点直连的邻居集合与它自己维护的版本号。
+/// 语义对齐上游 RouteConnInfo:版本仅由行所有者在自身连接集合变化时
+/// +1,中继方原样转发,接收方以 version > current 门槛接受。
+/// 中继绝不能代为递增客户端行版本:虚高的版本会把中继掌握的过期视图
+/// 强加给全网,把已建立的 p2p 边从快照中挤掉,引发流量在中继与 p2p
+/// 之间来回震荡。
+#[derive(Debug, Clone, Default)]
+struct ConnRow {
+    version: Version,
+    connected: BTreeSet<PeerId>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct SavedVersion {
     version: Version,
@@ -86,7 +98,7 @@ struct RouteGroupData {
     gateway_links: HashMap<PeerId, BTreeSet<PeerId>>,
     authenticated_peer_keys: HashMap<PeerId, Vec<u8>>,
     sessions: HashMap<PeerId, SessionState>,
-    peer_conn_versions: HashMap<PeerId, Version>,
+    conn_rows: HashMap<PeerId, ConnRow>,
     topology_version: u64,
     cached_conn_bitmap: Option<(u64, RouteConnBitmap)>,
     cached_conn_peer_list: Option<(u64, RouteConnPeerList)>,
@@ -198,7 +210,7 @@ impl RouteState {
                 gateway_links: HashMap::new(),
                 authenticated_peer_keys: HashMap::new(),
                 sessions: HashMap::new(),
-                peer_conn_versions: HashMap::new(),
+                conn_rows: HashMap::new(),
                 topology_version: 1,
                 cached_conn_bitmap: None,
                 cached_conn_peer_list: None,
@@ -231,7 +243,10 @@ impl RouteState {
         g.authenticated_peer_keys.insert(peer_id, public_key);
         let is_new = g.peers.insert(peer_id);
         if is_new {
-            Self::bump_all_conn_versions(g, my_peer_id);
+            // 新设备加入只改变中继自身的连接行,版本仅在中继行上递增;
+            // 客户端行版本由客户端自己维护,服务端不虚抬。
+            Self::update_my_conn_row(g, my_peer_id);
+            Self::note_topology_change(g);
         }
         Ok(())
     }
@@ -245,7 +260,7 @@ impl RouteState {
         let had_links = g.gateway_links.remove(&peer_id).is_some();
         g.authenticated_peer_keys.remove(&peer_id);
         g.sessions.remove(&peer_id);
-        g.peer_conn_versions.remove(&peer_id);
+        g.conn_rows.remove(&peer_id);
         for session in g.sessions.values_mut() {
             session.peer_info_ver_map.remove(&peer_id);
             session.last_topology_version = 0;
@@ -268,14 +283,15 @@ impl RouteState {
             g.peer_infos.remove(pid);
             g.raw_peer_infos.remove(pid);
             g.authenticated_peer_keys.remove(pid);
-            g.peer_conn_versions.remove(pid);
+            g.conn_rows.remove(pid);
             for session in g.sessions.values_mut() {
                 session.peer_info_ver_map.remove(pid);
                 session.last_topology_version = 0;
             }
         }
         if was_present || had_info || had_raw || had_links || purged {
-            Self::bump_all_conn_versions(g, my_peer_id);
+            Self::update_my_conn_row(g, my_peer_id);
+            Self::note_topology_change(g);
         }
     }
 
@@ -435,6 +451,8 @@ impl RouteState {
         let mut all_peers: BTreeSet<PeerId> = g.peers.clone();
         // 链式接入:包含经网关转发的第三方节点,让全网都能学到其路由。
         all_peers.extend(g.peer_infos.keys().copied());
+        // 持有 conn 行的节点(可能仅有行而无 peer_info)也要参与拓扑广播。
+        all_peers.extend(g.conn_rows.keys().copied());
         all_peers.insert(my_peer_id);
         all_peers.insert(target_peer_id);
         let relevant_peers: Vec<PeerId> = all_peers.into_iter().collect();
@@ -492,7 +510,6 @@ impl RouteState {
             &relevant_peers,
             target_peer_id,
             supports_conn_list,
-            my_peer_id,
             now_ms,
         )?;
         let topology_version = conn_info.as_ref().map(|_| g.topology_version);
@@ -671,10 +688,13 @@ impl RouteState {
             }
         }
 
-        if need_bump || topology_changed {
-            Self::bump_all_conn_versions(g, my_peer_id);
+        // 按所有者版本语义入库上报的 conn 行(含上报方代发的其他节点行),
+        // 仅当上报版本更高时覆盖,确保中继转发的永远是最新真实视图。
+        let conn_rows_changed = Self::store_conn_rows(g, req.conn_info.as_ref(), my_peer_id);
+        if need_bump || topology_changed || conn_rows_changed {
+            Self::note_topology_change(g);
         }
-        if topology_changed {
+        if topology_changed || conn_rows_changed {
             route_changed = true;
         }
 
@@ -751,59 +771,108 @@ impl RouteState {
         }
     }
 
-    fn bump_all_conn_versions(g: &mut RouteGroupData, my_peer_id: PeerId) {
-        let all: BTreeSet<PeerId> = g.peers.iter().chain(g.peer_infos.keys()).copied().collect();
-        for pid in all {
-            let v = g.peer_conn_versions.get(&pid).copied().unwrap_or(1);
-            g.peer_conn_versions.insert(pid, v + 1);
+    /// 中继自身的 conn 行:仅在直连节点集合真正变化时递增版本
+    /// (上游 update_my_conn_info 语义,内容比较而非事件计数)。
+    fn update_my_conn_row(g: &mut RouteGroupData, my_peer_id: PeerId) {
+        let connected: BTreeSet<PeerId> = g.peers.iter().copied().collect();
+        let row = g.conn_rows.entry(my_peer_id).or_default();
+        if row.connected != connected {
+            row.version += 1;
+            row.connected = connected;
         }
-        g.peer_conn_versions
-            .entry(my_peer_id)
-            .and_modify(|v| *v += 1)
-            .or_insert(2);
+    }
+
+    /// 标记拓扑内容变化:递增内部拓扑版本并失效 conn 缓存。
+    /// 注意这里不触碰任何 conn 行版本——行版本属于行所有者。
+    fn note_topology_change(g: &mut RouteGroupData) {
         g.topology_version = g.topology_version.wrapping_add(1).max(1);
         g.cached_conn_bitmap = None;
         g.cached_conn_peer_list = None;
     }
 
-    /// 计算节点的邻接集合:
-    /// - 本中继: 所有直连节点(不包含链式接入的第三方)。
-    /// - 直连节点: 本中继 + 其上报链路中的已知节点。
-    /// - 第三方节点: 与其保持链路的在线网关集合。
-    fn connected_peers(
-        g: &RouteGroupData,
-        relevant_peers: &[PeerId],
-        pid: PeerId,
+    /// 按上游语义入库上报的 conn 行:
+    /// - 行版本由行所有者维护,仅当上报版本严格高于已存版本时覆盖;
+    /// - 中继自身的行(以及 bitmap 中版本为 0 的引用占位)不入库;
+    /// - 仅入库已知节点(直连或已有 peer_info)的行,避免已断开节点的
+    ///   残留行被重放而在拓扑中滞留;
+    /// - 内容原样保留(包括中继自身作为邻居的边),接收方以版本门槛
+    ///   自行取舍,中继不代为过滤或改写。
+    fn store_conn_rows(
+        g: &mut RouteGroupData,
+        conn: Option<&ConnInfo>,
         my_peer_id: PeerId,
-    ) -> BTreeSet<PeerId> {
-        let mut set = BTreeSet::new();
-        if pid == my_peer_id {
-            for p in relevant_peers {
-                if *p != my_peer_id && g.peers.contains(p) {
-                    set.insert(*p);
+    ) -> bool {
+        let Some(conn) = conn else {
+            return false;
+        };
+        let mut changed = false;
+        let mut accept = |pid: PeerId, version: Version, connected: BTreeSet<PeerId>| {
+            if pid == my_peer_id || version == 0 {
+                return;
+            }
+            if !g.peers.contains(&pid) && !g.peer_infos.contains_key(&pid) {
+                return;
+            }
+            let entry = g.conn_rows.entry(pid).or_default();
+            if version > entry.version {
+                entry.version = version;
+                entry.connected = connected;
+                changed = true;
+            }
+        };
+        match conn {
+            ConnInfo::ConnPeerList(list) => {
+                for row in &list.peer_conn_infos {
+                    let Some(pv) = row.peer_id.as_ref() else {
+                        continue;
+                    };
+                    let connected: BTreeSet<PeerId> =
+                        row.connected_peer_ids.iter().copied().collect();
+                    accept(pv.peer_id, pv.version, connected);
                 }
             }
-        } else if g.peers.contains(&pid) {
-            set.insert(my_peer_id);
-            if let Some(links) = g.gateway_links.get(&pid) {
-                for link in links {
-                    if relevant_peers.contains(link) {
-                        set.insert(*link);
+            ConnInfo::ConnBitmap(bitmap) => {
+                let n = bitmap.peer_ids.len();
+                for (i, pv) in bitmap.peer_ids.iter().enumerate() {
+                    let mut connected = BTreeSet::new();
+                    for (j, other) in bitmap.peer_ids.iter().enumerate() {
+                        if i == j {
+                            continue;
+                        }
+                        let bit = i * n + j;
+                        if let Some(byte) = bitmap.bitmap.get(bit / 8) {
+                            if byte & (1 << (bit % 8)) != 0 {
+                                connected.insert(other.peer_id);
+                            }
+                        }
                     }
-                }
-            }
-        } else {
-            for (gateway, links) in &g.gateway_links {
-                if links.contains(&pid)
-                    && *gateway != pid
-                    && g.peers.contains(gateway)
-                    && relevant_peers.contains(gateway)
-                {
-                    set.insert(*gateway);
+                    accept(pv.peer_id, pv.version, connected);
                 }
             }
         }
-        set
+        changed
+    }
+
+    /// 解析单个节点的 conn 行:
+    /// - 有所有者上报的行: 原样使用其版本与邻居集合。
+    /// - 无行的直连节点: 空行(版本 0)。与中继的边由中继自身行提供,
+    ///   与其他节点的 p2p 边由对端上报的行提供。
+    /// - 无行的链式第三方: 合成行(版本 0, 邻居=在线网关),让全网学到
+    ///   到达路径;其真实行到达后(版本 >= 1)以更高版本自然覆盖。
+    fn conn_row_for(g: &RouteGroupData, pid: PeerId) -> (Version, BTreeSet<PeerId>) {
+        if let Some(row) = g.conn_rows.get(pid) {
+            return (row.version, row.connected.clone());
+        }
+        if g.peers.contains(&pid) {
+            return (0, BTreeSet::new());
+        }
+        let mut gateways = BTreeSet::new();
+        for (gateway, links) in &g.gateway_links {
+            if links.contains(&pid) && *gateway != pid && g.peers.contains(gateway) {
+                gateways.insert(*gateway);
+            }
+        }
+        (0, gateways)
     }
 
     fn build_conn_info(
@@ -811,7 +880,6 @@ impl RouteState {
         relevant_peers: &[PeerId],
         target_peer_id: PeerId,
         supports_conn_list: bool,
-        my_peer_id: PeerId,
         now_ms: u64,
     ) -> Result<Option<ConnInfo>, String> {
         if relevant_peers.is_empty() {
@@ -840,24 +908,31 @@ impl RouteState {
         }
 
         let n = relevant_peers.len();
-        let peer_id_versions: Vec<PeerIdVersion> = relevant_peers
+        // 先解析全部行(不可变借用),再写入缓存(可变借用)。
+        let rows: Vec<(PeerId, Version, BTreeSet<PeerId>)> = relevant_peers
             .iter()
-            .map(|pid| PeerIdVersion {
+            .map(|pid| {
+                let (version, connected) = Self::conn_row_for(g, *pid);
+                (*pid, version, connected)
+            })
+            .collect();
+        let peer_id_versions: Vec<PeerIdVersion> = rows
+            .iter()
+            .map(|(pid, version, _)| PeerIdVersion {
                 peer_id: *pid,
-                version: g.peer_conn_versions.get(pid).copied().unwrap_or(1),
+                version: *version,
             })
             .collect();
 
         if supports_conn_list {
-            let peer_conn_infos = peer_id_versions
+            let peer_conn_infos = rows
                 .iter()
-                .map(|pv| {
-                    let connected =
-                        Self::connected_peers(g, relevant_peers, pv.peer_id, my_peer_id);
-                    route_conn_peer_list::PeerConnInfo {
-                        peer_id: Some(pv.clone()),
-                        connected_peer_ids: connected.into_iter().collect(),
-                    }
+                .map(|(pid, version, connected)| route_conn_peer_list::PeerConnInfo {
+                    peer_id: Some(PeerIdVersion {
+                        peer_id: *pid,
+                        version: *version,
+                    }),
+                    connected_peer_ids: connected.iter().copied().collect(),
                 })
                 .collect();
             let result = RouteConnPeerList { peer_conn_infos };
@@ -885,10 +960,10 @@ impl RouteState {
             bitmap[idx / 8] |= 1 << (idx % 8);
         };
 
-        for (i, pid) in relevant_peers.iter().enumerate() {
+        for (i, (_, _, connected)) in rows.iter().enumerate() {
             set_bit(&mut bitmap, i, i);
-            for link in Self::connected_peers(g, relevant_peers, *pid, my_peer_id) {
-                if let Some(&j) = idx_by_peer.get(&link) {
+            for link in connected {
+                if let Some(&j) = idx_by_peer.get(link) {
                     set_bit(&mut bitmap, i, j);
                     set_bit(&mut bitmap, j, i);
                 }
@@ -1059,11 +1134,16 @@ mod tests {
     }
 
     fn conn_row(pid: PeerId, connected: &[PeerId]) -> route_conn_peer_list::PeerConnInfo {
+        conn_row_v(pid, 1, connected)
+    }
+
+    fn conn_row_v(
+        pid: PeerId,
+        version: u32,
+        connected: &[PeerId],
+    ) -> route_conn_peer_list::PeerConnInfo {
         route_conn_peer_list::PeerConnInfo {
-            peer_id: Some(PeerIdVersion {
-                peer_id: pid,
-                version: 1,
-            }),
+            peer_id: Some(PeerIdVersion { peer_id: pid, version }),
             connected_peer_ids: connected.to_vec(),
         }
     }
@@ -1259,6 +1339,74 @@ mod tests {
             .authenticated_peer_keys
             .get(&CHAINED_C)
             .is_some_and(|k| k == &key(0x33)));
+    }
+
+    #[test]
+    fn conn_row_versions_are_owner_controlled() {
+        // 回归:新设备加入只递增中继自身的行版本;客户端行保留所有者
+        // 版本与完整邻居集合,不再被服务端虚抬的过期视图覆盖
+        // (p2p → 中继 → p2p 震荡的根因)。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        s.add_peer("net", PEER_A, &[]).unwrap();
+        let req_a = sync_req(PEER_A, vec![conn_list_peer_info(PEER_A, 1, &key(0x44), 9)], None);
+        s.handle_sync_route_info_request("net", PEER_A, &req_a, 1_000)
+            .unwrap();
+        // B 上报自身行(版本 5):与中继和 A 皆有连接(p2p)。
+        let conn = ConnInfo::ConnPeerList(RouteConnPeerList {
+            peer_conn_infos: vec![conn_row_v(GATEWAY_B, 5, &[SERVER_ID, PEER_A])],
+        });
+        let req = sync_req(GATEWAY_B, vec![], Some(conn));
+        s.handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
+            .unwrap();
+        // 新设备 D 加入。
+        s.add_peer("net", GATEWAY_D, &[]).unwrap();
+        let update = s
+            .build_sync_route_info_request("net", PEER_A, 9, true, false, 2_000)
+            .unwrap();
+        let decoded = SyncRouteInfoRequest::decode(update.payload.as_slice()).unwrap();
+        let ConnInfo::ConnPeerList(list) = decoded.conn_info.unwrap() else {
+            panic!("expected conn peer list");
+        };
+        let row = |pid: PeerId| {
+            list.peer_conn_infos
+                .iter()
+                .find(|r| r.peer_id.as_ref().is_some_and(|pv| pv.peer_id == pid))
+                .unwrap()
+        };
+        // B 的行仍是版本 5,p2p 边 B--A 完整保留。
+        assert_eq!(row(GATEWAY_B).peer_id.as_ref().unwrap().version, 5);
+        let connected = row(GATEWAY_B).connected_peer_ids.clone();
+        assert!(connected.contains(&PEER_A));
+        assert!(connected.contains(&SERVER_ID));
+        // 中继行因 D 加入递增到 3(依次加入 B、A、D)。
+        assert_eq!(row(SERVER_ID).peer_id.as_ref().unwrap().version, 3);
+        assert!(row(SERVER_ID).connected_peer_ids.contains(&GATEWAY_D));
+    }
+
+    #[test]
+    fn stale_conn_rows_are_ignored() {
+        // 低版本的行上报(乱序/重放)不会覆盖已存的更高版本内容。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        s.add_peer("net", PEER_A, &[]).unwrap();
+        let req_a = sync_req(PEER_A, vec![conn_list_peer_info(PEER_A, 1, &key(0x44), 9)], None);
+        s.handle_sync_route_info_request("net", PEER_A, &req_a, 1_000)
+            .unwrap();
+        let fresh = ConnInfo::ConnPeerList(RouteConnPeerList {
+            peer_conn_infos: vec![conn_row_v(GATEWAY_B, 5, &[SERVER_ID, PEER_A])],
+        });
+        s.handle_sync_route_info_request("net", GATEWAY_B, &sync_req(GATEWAY_B, vec![], Some(fresh)), 1_000)
+            .unwrap();
+        let stale = ConnInfo::ConnPeerList(RouteConnPeerList {
+            peer_conn_infos: vec![conn_row_v(GATEWAY_B, 3, &[SERVER_ID])],
+        });
+        s.handle_sync_route_info_request("net", GATEWAY_B, &sync_req(GATEWAY_B, vec![], Some(stale)), 2_000)
+            .unwrap();
+        let g = s.groups.get("net").unwrap();
+        let row = g.conn_rows.get(&GATEWAY_B).unwrap();
+        assert_eq!(row.version, 5);
+        assert!(row.connected.contains(&PEER_A));
     }
 
     #[test]
