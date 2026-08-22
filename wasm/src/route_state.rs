@@ -11,31 +11,30 @@ pub type PeerId = u32;
 pub type Version = u32;
 pub type SessionId = u64;
 
-/// 校验路由信息中上报的 Noise 公钥,必要时完成首次绑定。
+/// 在路由信息中记录上报的 Noise 公钥(信息性首见绑定,非鉴权)。
 ///
-/// - secure 握手节点:绑定的 32 字节公钥必须与上报值逐字节一致。
-/// - legacy 握手节点:握手时无法获得公钥,绑定为空键。上游客户端
-///   即使未启用加密也总会生成 X25519 密钥对并在 `RoutePeerInfo` 中
-///   上报真实公钥,因此空键在首次路由同步时绑定上报值,后续必须一致,
-///   防止同一连接内身份漂移。
+/// 上游 EasyTier 的路由同步(`update_peer_infos`)只比较版本号,不做
+/// 任何密钥绑定校验——密钥身份完全由传输层(Noise 会话/legacy 握手的
+/// secret 摘要)强制,路由层不重复校验。且上游非 secure-mode 客户端在
+/// `RoutePeerInfo` 中上报的是**空**公钥(`unwrap_or_default()`),
+/// “上游客户端总是上报真实公钥”是错误前提。
+///
+/// 因此本函数仅在绑定尚为空且上报值为合法 32 字节公钥时完成首见绑定
+/// (供诊断与转播参考),任何长度异常或不匹配都**容忍并放行**,绝不
+/// 因此拒绝路由更新——错误的路由条目最多影响转播内容,而拒绝会让
+/// 客户端进入重连死循环。
 fn validate_or_bind_reported_key(
     authenticated: &mut Vec<u8>,
     reported: &[u8],
 ) -> Result<(), String> {
-    if !reported.is_empty() && reported.len() != 32 {
-        return Err("RoutePeerInfo public key must be empty or 32 bytes".to_string());
-    }
-    if authenticated.is_empty() {
-        if !reported.is_empty() {
-            authenticated.extend_from_slice(reported);
-        }
+    if reported.len() != 32 {
+        // 空公钥(非 secure-mode 客户端)或异常长度:不做任何绑定,也不拒绝。
         return Ok(());
     }
-    if reported != authenticated.as_slice() {
-        return Err(
-            "RoutePeerInfo public key does not match the authenticated Noise identity".to_string(),
-        );
+    if authenticated.is_empty() {
+        authenticated.extend_from_slice(reported);
     }
+    // 已有绑定时报文与绑定不一致:保留首个绑定,容忍放行(对齐上游)。
     Ok(())
 }
 
@@ -99,19 +98,47 @@ struct RouteGroupData {
 ///
 /// 除星型直连外还支持链式接入:节点 C 不直连本中继,而是经直连节点 B
 /// (网关)转发路由信息接入网络。网关必须是通过 Noise/legacy 握手的
-/// 已认证成员;其代发的第三方条目会绑定公钥防漂移,且不得冒充直连
-/// 节点或本中继。网关断开后,失去所有网关链路的第三方节点被清除。
+/// 已认证成员;其代发的第三方条目会做公钥首见绑定(信息性,不鉴权),
+/// 且不得冒充直连节点或本中继。网关断开后,失去所有网关链路的
+/// 第三方节点被清除。
+///
+/// 错误处理哲学对齐上游:路由层校验失败一律作为可容忍的数据问题
+/// 返回给调用方(由 RPC 层写入 `SyncRouteInfoResponse.error`),
+/// 绝不升级为断开连接。
 pub(crate) struct RouteState {
     groups: HashMap<String, RouteGroupData>,
     my_peer_id: PeerId,
+    // DO 重启后由宿主注入的持久化 peer_route_id,分组创建时优先于随机值。
+    route_id_overrides: HashMap<String, u64>,
 }
 
 impl RouteState {
     pub(crate) fn new(my_peer_id: PeerId) -> Self {
         RouteState {
             groups: HashMap::new(),
+            route_id_overrides: HashMap::new(),
             my_peer_id,
         }
+    }
+
+    /// 注入持久化的 peer_route_id(宿主在 DO 启动时从 storage 恢复)。
+    /// 分组已存在则直接改写,否则在分组创建时优先使用。
+    pub(crate) fn set_persisted_route_id(&mut self, group_key: &str, route_id: u64) {
+        if let Some(g) = self.groups.get_mut(group_key) {
+            g.my_info.peer_route_id = route_id;
+        } else {
+            self.route_id_overrides
+                .insert(group_key.to_string(), route_id);
+        }
+    }
+
+    /// 读取(必要时创建分组并生成本中继在该网络的 peer_route_id。
+    /// 宿主负责把首次生成的值持久化到 DO storage,以便 DO 被平台驱逐
+    /// 重启后复用同一 route_id——上游服务进程长驻、route_id 天然稳定,
+    /// 客户端会拿它区分服务端路由条目实例,反复变化会与新实例冲突。
+    pub(crate) fn my_peer_route_id(&mut self, group_key: &str) -> u64 {
+        let g = self.ensure_group(group_key);
+        g.my_info.peer_route_id
     }
 
     fn random_u32() -> u32 {
@@ -142,6 +169,7 @@ impl RouteState {
 
     fn ensure_group(&mut self, group_key: &str) -> &mut RouteGroupData {
         let my_peer_id = self.my_peer_id;
+        let persisted_route_id = self.route_id_overrides.remove(group_key);
         self.groups.entry(group_key.to_string()).or_insert_with(|| {
             let mut my_info = RoutePeerInfo::default();
             my_info.peer_id = my_peer_id;
@@ -151,7 +179,7 @@ impl RouteState {
             my_info.network_length = 24;
             my_info.easytier_version = EASYTIER_VERSION.to_string();
             my_info.hostname = Some("edge".to_string());
-            my_info.peer_route_id = Self::random_u64();
+            my_info.peer_route_id = persisted_route_id.unwrap_or_else(Self::random_u64);
             my_info.feature_flag = Some(crate::proto::common::PeerFeatureFlag {
                 is_public_server: true,
                 // 本节点是实际后备中继，而非仅用于发现的节点。
@@ -197,12 +225,9 @@ impl RouteState {
         let public_key = public_key.to_vec();
         let my_peer_id = self.my_peer_id;
         let g = self.ensure_group(group_key);
-        if g.authenticated_peer_keys
-            .get(&peer_id)
-            .is_some_and(|current| current.as_slice() != public_key.as_slice())
-        {
-            return Err("peer id is already bound to another authenticated public key".to_string());
-        }
+        // 重复 peer_id 携新密钥(节点重启换钥后重连)时直接覆盖旧绑定:
+        // 新连接已通过传输层鉴权,旧绑定只是残留状态。上游从不因密钥
+        // 漂移拒绝连接,此处拒绝会让重连进入死循环。
         g.authenticated_peer_keys.insert(peer_id, public_key);
         let is_new = g.peers.insert(peer_id);
         if is_new {
@@ -565,12 +590,12 @@ impl RouteState {
                     }
                 }
                 if is_self {
+                    // 信息性首见绑定:上报公钥与握手绑定不一致时容忍放行,
+                    // 身份由传输层(Noise 会话)强制,路由层不重复鉴权。
                     let authenticated_key = g
                         .authenticated_peer_keys
-                        .get_mut(&from_peer_id)
-                        .ok_or_else(|| {
-                            "route peer has no authenticated public key".to_string()
-                        })?;
+                        .entry(from_peer_id)
+                        .or_default();
                     validate_or_bind_reported_key(
                         authenticated_key,
                         &info.noise_static_pubkey,
@@ -679,31 +704,16 @@ impl RouteState {
             .count()
     }
 
-    /// 绑定第三方节点的公钥。实例变更(节点重启换密钥)允许重新绑定,
-    /// 同一实例内的密钥漂移视为身份攻击而被拒绝。
+    /// 第三方条目的公钥首见绑定(信息性,非鉴权)。
+    ///
+    /// 对齐上游:路由层不做密钥校验,身份由网关的传输层会话背书;
+    /// 绑定仅用于诊断与转播参考,任何不一致都容忍,绝不拒绝条目。
     fn bind_third_party_key(g: &mut RouteGroupData, info: &RoutePeerInfo) -> Result<(), String> {
         let binding = g
             .authenticated_peer_keys
             .entry(info.peer_id)
             .or_default();
-        if validate_or_bind_reported_key(binding, &info.noise_static_pubkey).is_err() {
-            let instance_changed = g
-                .peer_infos
-                .get(&info.peer_id)
-                .is_some_and(|current| current.inst_id != info.inst_id);
-            if !instance_changed {
-                return Err(
-                    "relayed RoutePeerInfo public key does not match the bound Noise identity"
-                        .to_string(),
-                );
-            }
-            g.authenticated_peer_keys.insert(info.peer_id, Vec::new());
-            let binding = g
-                .authenticated_peer_keys
-                .get_mut(&info.peer_id)
-                .expect("rebinding entry was just inserted");
-            validate_or_bind_reported_key(binding, &info.noise_static_pubkey)?;
-        }
+        validate_or_bind_reported_key(binding, &info.noise_static_pubkey)?;
         Ok(())
     }
 
@@ -1059,42 +1069,47 @@ mod tests {
     }
 
     #[test]
-    fn secure_peer_requires_exact_key_match() {
+    fn key_mismatch_is_tolerated_not_rejected() {
+        // 对齐上游:路由层不做密钥鉴权,不一致时保留首个绑定并放行。
         let mut bound = KEY_A.to_vec();
         assert!(validate_or_bind_reported_key(&mut bound, &KEY_A).is_ok());
-        assert!(validate_or_bind_reported_key(&mut bound, &KEY_B).is_err());
-        // secure 节点上报空键视为不匹配。
-        assert!(validate_or_bind_reported_key(&mut bound, &[]).is_err());
+        assert!(validate_or_bind_reported_key(&mut bound, &KEY_B).is_ok());
+        assert!(validate_or_bind_reported_key(&mut bound, &[]).is_ok());
         assert_eq!(bound, KEY_A.to_vec());
     }
 
     #[test]
     fn legacy_peer_binds_reported_key_on_first_sync() {
-        // legacy 握手绑定为空键;上游客户端即使未启用加密也会在
-        // RoutePeerInfo 中上报真实 X25519 公钥,首次同步必须放行并绑定。
+        // legacy 握手绑定为空键;secure-mode 客户端会在 RoutePeerInfo
+        // 中上报真实 X25519 公钥,首次同步时完成首见绑定。
         let mut bound = Vec::new();
         assert!(validate_or_bind_reported_key(&mut bound, &KEY_A).is_ok());
         assert_eq!(bound, KEY_A.to_vec());
-        // 绑定后同一连接内换公钥被拒绝。
-        assert!(validate_or_bind_reported_key(&mut bound, &KEY_B).is_err());
+        // 绑定后同一连接内换公钥:保留首个绑定,容忍放行。
+        assert!(validate_or_bind_reported_key(&mut bound, &KEY_B).is_ok());
+        assert_eq!(bound, KEY_A.to_vec());
         // 重复上报同一公钥保持通过。
         assert!(validate_or_bind_reported_key(&mut bound, &KEY_A).is_ok());
     }
 
     #[test]
     fn legacy_peer_may_stay_keyless() {
-        // 极老客户端可能不上报公钥,保持空绑定时空对空放行。
+        // 上游非 secure-mode 客户端上报的是空公钥
+        // (`unwrap_or_default()`),空对空放行且不做绑定。
         let mut bound = Vec::new();
         assert!(validate_or_bind_reported_key(&mut bound, &[]).is_ok());
         assert!(bound.is_empty());
     }
 
     #[test]
-    fn rejects_malformed_key_lengths() {
+    fn malformed_key_lengths_are_ignored() {
+        // 长度异常的上报值既不绑定也不拒绝。
         let mut empty = Vec::new();
-        assert!(validate_or_bind_reported_key(&mut empty, &[1u8; 16]).is_err());
+        assert!(validate_or_bind_reported_key(&mut empty, &[1u8; 16]).is_ok());
+        assert!(empty.is_empty());
         let mut bound = KEY_A.to_vec();
-        assert!(validate_or_bind_reported_key(&mut bound, &[1u8; 33]).is_err());
+        assert!(validate_or_bind_reported_key(&mut bound, &[1u8; 33]).is_ok());
+        assert_eq!(bound, KEY_A.to_vec());
     }
 
     #[test]
@@ -1150,7 +1165,9 @@ mod tests {
     }
 
     #[test]
-    fn third_party_key_drift_is_rejected() {
+    fn third_party_key_drift_is_tolerated() {
+        // 对齐上游:同一实例内密钥漂移不再拒绝,路由更新照常接受,
+        // 避免网关代发路径被误杀导致客户端重连死循环。
         let mut s = RouteState::new(SERVER_ID);
         s.add_peer("net", GATEWAY_B, &[]).unwrap();
         let first = sync_req(
@@ -1165,9 +1182,48 @@ mod tests {
             vec![peer_info(CHAINED_C, 2, &key(0x99), 1)],
             None,
         );
-        assert!(s
+        let outcome = s
             .handle_sync_route_info_request("net", GATEWAY_B, &drift, 2_000)
-            .is_err());
+            .unwrap();
+        assert!(outcome.route_changed);
+        let g = s.groups.get("net").unwrap();
+        assert!(g
+            .peer_infos
+            .get(&CHAINED_C)
+            .is_some_and(|info| info.version == 2));
+        // 首见绑定保留,不因漂移改写。
+        assert!(g
+            .authenticated_peer_keys
+            .get(&CHAINED_C)
+            .is_some_and(|k| k == &key(0x33)));
+    }
+
+    #[test]
+    fn peer_route_id_is_stable_across_restart() {
+        // DO 重启后宿主注入持久化的 route_id,分组复用旧值,
+        // 避免客户端缓存的服务端条目与新实例冲突。
+        let mut s = RouteState::new(SERVER_ID);
+        s.set_persisted_route_id("net", 0x00ff_00ff_00ff_00ff);
+        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        let route_id = s.my_peer_route_id("net");
+        assert_eq!(route_id, 0x00ff_00ff_00ff_00ff);
+
+        // 模拟 DO 重新实例化:新 RouteState + 相同持久化值。
+        let mut s2 = RouteState::new(SERVER_ID);
+        s2.set_persisted_route_id("net", route_id);
+        s2.add_peer("net", GATEWAY_B, &[]).unwrap();
+        assert_eq!(s2.my_peer_route_id("net"), route_id);
+    }
+
+    #[test]
+    fn peer_route_id_defaults_to_random_when_not_persisted() {
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        let route_id = s.my_peer_route_id("net");
+        assert_ne!(route_id, 0);
+        // 同一实例内保持稳定。
+        assert_eq!(s.my_peer_route_id("net"), route_id);
+        assert_eq!(s.my_peer_route_id("other"), s.my_peer_route_id("other"));
     }
 
     #[test]

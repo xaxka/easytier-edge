@@ -10,8 +10,10 @@ use crate::proto::common::{
 use crate::proto::error::{
     Error as RpcError, InvalidMethodIndex, InvalidService, error::ErrorKind,
 };
-use crate::proto::peer_rpc::{SyncRouteInfoRequest, SyncRouteInfoResponse};
-use crate::route_state::{RouteState, RouteUpdate};
+use crate::proto::peer_rpc::{
+    SyncRouteInfoError, SyncRouteInfoRequest, SyncRouteInfoResponse,
+};
+use crate::route_state::{RouteState, RouteSyncOutcome, RouteUpdate};
 
 const MAX_RPC_PIECES: u32 = 32_768;
 const MAX_PENDING_TRANSACTIONS_PER_PEER: usize = 64;
@@ -163,6 +165,21 @@ impl WasmRpcCore {
         self.routes.get_next_hop(network, peer_id).unwrap_or(0)
     }
 
+    /// 恢复持久化的 peer_route_id(16 位十六进制字符串,宿主在 DO 启动时
+    /// 从 storage 注入,须早于 add_peer 调用)。
+    pub fn set_peer_route_id(&mut self, network: &str, route_id: &str) -> Result<(), JsValue> {
+        let value = u64::from_str_radix(route_id, 16)
+            .map_err(|_| error("peer route id must be a 16-digit hex string"))?;
+        self.routes.set_persisted_route_id(network, value);
+        Ok(())
+    }
+
+    /// 读取(必要时生成)本中继在该网络的 peer_route_id,宿主负责把首次
+    /// 生成的值持久化到 DO storage,DO 重启后回注保持稳定。
+    pub fn get_peer_route_id(&mut self, network: &str) -> String {
+        format!("{:016x}", self.routes.my_peer_route_id(network))
+    }
+
     pub fn handle_request(
         &mut self,
         network: &str,
@@ -193,22 +210,36 @@ impl WasmRpcCore {
                     RESULT_HANDLED,
                 )
             } else {
-                let sync = SyncRouteInfoRequest::decode(request.request.as_slice())
-                    .map_err(|err| error(&format!("decode SyncRouteInfoRequest failed: {err}")))?;
-                let we_are_initiator = !sync.is_initiator;
+                // 解码仅用于确定发起方角色;请求本身由路由层解码,
+                // 解码失败会被转换成 SyncRouteInfoResponse.error 返回。
+                let we_are_initiator = SyncRouteInfoRequest::decode(request.request.as_slice())
+                    .map(|sync| !sync.is_initiator)
+                    .unwrap_or(true);
                 self.peer_initiator.insert(
                     (network.to_string(), authenticated_peer_id),
                     we_are_initiator,
                 );
-                let outcome = self
-                    .routes
-                    .handle_sync_route_info_request(
-                        network,
-                        authenticated_peer_id,
-                        &request.request,
-                        now_ms,
-                    )
-                    .map_err(|e| error(&e))?;
+                // 对齐上游 do_sync_route_info 的哲学:路由层任何校验
+                // 失败都只是可容忍的数据问题,写入 SyncRouteInfoResponse.
+                // error 返回,连接保持存活。绝不向 JS 抛错触发
+                // failConnection/close(4401)。
+                let outcome = match self.routes.handle_sync_route_info_request(
+                    network,
+                    authenticated_peer_id,
+                    &request.request,
+                    now_ms,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(_route_error) => RouteSyncOutcome {
+                        response: SyncRouteInfoResponse {
+                            error: Some(SyncRouteInfoError::DuplicatePeerId as i32),
+                            ..Default::default()
+                        }
+                        .encode_to_vec(),
+                        route_changed: false,
+                        session_changed: false,
+                    },
+                };
                 let result = if outcome.route_changed {
                     RESULT_ROUTE
                 } else if outcome.session_changed {
@@ -284,14 +315,18 @@ impl WasmRpcCore {
             .map_err(|err| error(&format!("decode RpcPacket failed: {err}")))?;
         self.validate_envelope(&packet, network, authenticated_peer_id, false)?;
         let key = rpc_key(network, authenticated_peer_id, packet.transaction_id, false);
-        let deadline = self
+        // 未知事务的迟到响应:上游会直接丢弃,这里同样忽略(在途状态由
+        // 超时重发机制自愈),不作为连接错误。
+        let Some(deadline) = self
             .outstanding_routes
             .get(&key)
             .map(|route| route.deadline_ms)
-            .ok_or_else(|| error("RPC response does not match an outstanding transaction"))?;
+        else {
+            return Ok(false);
+        };
         if now_ms > deadline {
             self.outstanding_routes.remove(&key);
-            return Err(error("RPC response arrived after its transaction deadline"));
+            return Ok(false);
         }
 
         let packet = match self.merge_packet(network, authenticated_peer_id, packet, now_ms)? {
@@ -304,21 +339,26 @@ impl WasmRpcCore {
             .as_ref()
             .ok_or_else(|| error("RPC response is missing its descriptor"))?;
         if !is_service(descriptor, "OspfRouteRpc") || descriptor.method_index != 1 {
-            return Err(error(
-                "RPC response descriptor does not match the route request",
-            ));
+            // 描述符不匹配视为数据问题:忽略本次响应,由超时重发自愈。
+            return Ok(false);
         }
-        let response = RpcResponse::decode(packet.body.as_slice())
-            .map_err(|err| error(&format!("decode RpcResponse failed: {err}")))?;
+        let Ok(response) = RpcResponse::decode(packet.body.as_slice()) else {
+            return Ok(false);
+        };
         if response.error.is_some() {
-            return Err(error("peer rejected the route synchronization RPC"));
+            // 对端在 RPC 层拒绝(如 DuplicatePeerId):上游客户端仅记录
+            // 并等待下次同步,这里同样作废本次事务,绝不杀连接。
+            self.outstanding_routes.remove(&key);
+            return Ok(true);
         }
-        let sync = SyncRouteInfoResponse::decode(response.response.as_slice())
-            .map_err(|err| error(&format!("decode SyncRouteInfoResponse failed: {err}")))?;
-        if let Some(route_error) = sync.error {
-            return Err(error(&format!(
-                "peer returned route synchronization error {route_error}"
-            )));
+        let Ok(sync) = SyncRouteInfoResponse::decode(response.response.as_slice()) else {
+            return Ok(false);
+        };
+        if let Some(_route_error) = sync.error {
+            // 路由同步错误按上游语义容忍:作废本次事务,周期性重试
+            // (10s 维护定时器)会重新发起同步。
+            self.outstanding_routes.remove(&key);
+            return Ok(true);
         }
         let outstanding = self
             .outstanding_routes

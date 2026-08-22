@@ -59,6 +59,16 @@ export class EasyTierRpc {
 		return this.core.get_next_hop(networkName, peerId);
 	}
 
+	/** 恢复 DO storage 持久化的 peer_route_id,须早于 addPeer 调用。 */
+	setPeerRouteId(networkName: string, routeId: string): void {
+		this.core.set_peer_route_id(networkName, routeId);
+	}
+
+	/** 读取(必要时生成)网络的 peer_route_id,首次生成的值需持久化。 */
+	getPeerRouteId(networkName: string): string {
+		return this.core.get_peer_route_id(networkName);
+	}
+
 	cleanExpired(now: number): RouteSyncFailure[] {
 		this.core.clean_expired(BigInt(now));
 		const failures: RouteSyncFailure[] = [];
