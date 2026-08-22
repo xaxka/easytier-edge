@@ -860,7 +860,7 @@ impl RouteState {
     /// - 无行的链式第三方: 合成行(版本 0, 邻居=在线网关),让全网学到
     ///   到达路径;其真实行到达后(版本 >= 1)以更高版本自然覆盖。
     fn conn_row_for(g: &RouteGroupData, pid: PeerId) -> (Version, BTreeSet<PeerId>) {
-        if let Some(row) = g.conn_rows.get(pid) {
+        if let Some(row) = g.conn_rows.get(&pid) {
             return (row.version, row.connected.clone());
         }
         if g.peers.contains(&pid) {
