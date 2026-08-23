@@ -108,3 +108,21 @@ describe("readServerConfig", () => {
 		expect(() => readServerConfig(env({ CONNECTION_MODE: "0" }))).toThrow(/CONNECTION_MODE/);
 	});
 });
+
+describe("RELAY_PEER_ROUTES", () => {
+	it("defaults to disabled (signaling-server topology)", () => {
+		const config = readServerConfig(env());
+		expect(config.relayPeerRoutes).toBe(false);
+	});
+
+	it("parses explicit true for chained gateway deployments", () => {
+		const config = readServerConfig(env({ RELAY_PEER_ROUTES: "true" }));
+		expect(config.relayPeerRoutes).toBe(true);
+	});
+
+	it("rejects malformed values", () => {
+		expect(() => readServerConfig(env({ RELAY_PEER_ROUTES: "yes-please" }))).toThrow(
+			/RELAY_PEER_ROUTES/,
+		);
+	});
+});

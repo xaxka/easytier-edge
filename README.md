@@ -88,6 +88,7 @@ EASYTIER_HOSTNAME=edge
 | `MAX_FRAME_BYTES` | No | Frame limit; defaults to 1 MiB, allowed range 1 KiB–16 MiB. |
 | `MAX_PENDING_PER_IP` | No | Per-IP cap on concurrent connections that have not finished the handshake; defaults to `17`, allowed range 1–2048. Only throttles handshakes, never authenticated peers behind shared NAT. |
 | `CONNECTION_MODE` | No | Handshake selector. `secure` (default): accept only Noise XX secure handshakes. `legacy`: accept only the EasyTier 2.6.4 plaintext `HandShake` exchange authenticated by the network-secret digest, for clients that cannot configure secure mode. Legacy mode never encrypts the transport. The two modes cannot be mixed in one network — see [Why the two modes cannot be mixed](#why-the-two-modes-cannot-be-mixed). |
+| `RELAY_PEER_ROUTES` | No | Defaults to `false`. Controls whether third-party route entries relayed by gateway peers (chained access) are accepted. In the default signaling-server topology every node connects directly to the relay, so relayed entries can only come from client route caches replayed after a server redeploy — accepting them broadcasts dead peers to the whole network and every node then times out hole punching against them. Keep it off unless you really have chained gateways. When enabled, entries whose original `last_update` is older than 30 seconds are still rejected, timestamps are never refreshed server-side, and half-open direct peers (90 s of sync silence) are removed and closed automatically. |
 
 Set production credentials through Wrangler:
 

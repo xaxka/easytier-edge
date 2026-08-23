@@ -50,6 +50,14 @@ pub(crate) struct RouteUpdate {
     pub(crate) topology_version: Option<u64>,
 }
 
+/// 过期清理结果:route_changed 表示路由表发生变化(应触发重发),
+/// dead_direct_peers 是会话静默超时的半开直连节点("网络\u{1f}peer_id"),
+/// 宿主应关闭其 WebSocket 连接。
+pub(crate) struct SweepOutcome {
+    pub(crate) route_changed: bool,
+    pub(crate) dead_direct_peers: Vec<String>,
+}
+
 const EASYTIER_VERSION: &str = "2.6.4-8428a89d-edge";
 const MAX_LEGACY_BITMAP_PEERS: usize = 8_192;
 const SAVED_ROUTE_VERSION_TTL_MS: u64 = 60_000;
@@ -64,6 +72,11 @@ const REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS: u64 = 90_000;
 /// UPDATE_PEER_INFO_PERIOD(3600s)未发生版本续期的条目无条件回收,
 /// 防止僵尸条目长期占用 MAX_RELAYED_PEERS 额度并污染路由。
 const REMOVE_DEAD_PEER_INFO_AFTER_MS: u64 = 3_660_000;
+/// 链式接入开启(RELAY_PEER_ROUTES=true)时,拒收原始 last_update
+/// 距今超过此时限的第三方条目:活跃网关链路会在转发前刷新时间戳,
+/// 陈旧条目只能来自服务端重启后客户端缓存回传的死节点。拒收同时
+/// 不刷新时间戳、不重建 gateway_links,斩断"清理→回传→复活"循环。
+const RELAY_STALE_AFTER_MS: u64 = 30_000;
 
 /// 单个节点的连接行:该节点直连的邻居集合与它自己维护的版本号。
 /// 语义对齐上游 RouteConnInfo:版本仅由行所有者在自身连接集合变化时
@@ -130,6 +143,11 @@ pub(crate) struct RouteState {
     my_peer_id: PeerId,
     // DO 重启后由宿主注入的持久化 peer_route_id,分组创建时优先于随机值。
     route_id_overrides: HashMap<String, u64>,
+    /// 是否接受网关代发的第三方节点路由(链式接入)。
+    /// 信令服务器拓扑(所有节点直连本中继)下应保持关闭(默认):
+    /// 服务端重启后客户端会回传本地缓存的死节点路由,链式转发路径
+    /// 会把这类条目原样注入并广播,污染全网路由表。
+    relay_peer_routes: bool,
 }
 
 impl RouteState {
@@ -138,7 +156,13 @@ impl RouteState {
             groups: HashMap::new(),
             route_id_overrides: HashMap::new(),
             my_peer_id,
+            relay_peer_routes: false,
         }
+    }
+
+    /// RELAY_PEER_ROUTES 开关:控制是否接受网关代发的第三方路由。
+    pub(crate) fn set_relay_peer_routes(&mut self, enabled: bool) {
+        self.relay_peer_routes = enabled;
     }
 
     /// 注入持久化的 peer_route_id(宿主在 DO 启动时从 storage 恢复)。
@@ -233,6 +257,7 @@ impl RouteState {
         group_key: &str,
         peer_id: PeerId,
         public_key: &[u8],
+        now_ms: u64,
     ) -> Result<(), String> {
         // legacy 握手的节点没有 Noise 静态公钥,以空键表示;
         // secure 模式节点必须提供 32 字节公钥。
@@ -245,6 +270,9 @@ impl RouteState {
         let public_key = public_key.to_vec();
         let my_peer_id = self.my_peer_id;
         let g = self.ensure_group(group_key);
+        // 重连基线:会话活跃度以“收到对端数据”为准,新连接建立即重置
+        // liveness 计时起点,避免刚重连的节点被 sweep 误判为半开连接。
+        g.sessions.entry(peer_id).or_default().last_touch_ms = now_ms;
         // 重复 peer_id 携新密钥(节点重启换钥后重连)时直接覆盖旧绑定:
         // 新连接已通过传输层鉴权,旧绑定只是残留状态。上游从不因密钥
         // 漂移拒绝连接,此处拒绝会让重连进入死循环。
@@ -304,17 +332,42 @@ impl RouteState {
     }
 
     /// 定期回收过期路由信息(对齐上游 clear_expired_peer):
-    /// - 直连节点:信息超过 REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS
-    ///   且会话最近同步已超时(90s 无任何同步活动)时回收——覆盖
-    ///   WebSocket close 事件丢失、remove_peer 未被调用的异常掉线;
-    /// - 链式第三方节点:失去在线网关链路支撑超过 90s 即回收;
+    /// - 半开直连节点:会话超过 REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS
+    ///   (90s)没有任何同步活动时,执行完整 remove_peer 语义(覆盖
+    ///   WebSocket close 事件丢失、remove_peer 未被调用的异常掉线),
+    /// 并上报给宿主关闭对应连接;
+    /// - 直连节点的路由条目:条目过期且会话已超时(90s)时回收;
+    /// - 链式第三方节点:失去在线网关链路支撑超过 90s 即回收;链式
+    ///   接入关闭(RELAY_PEER_ROUTES=false)时一律视为不可达;
     /// - 任何条目超过 REMOVE_DEAD_PEER_INFO_AFTER_MS(3660s)
     ///   无条件回收(正常节点每 3600s 至少版本续期一次)。
-    /// 返回是否有条目被回收(调用方可用于决定是否触发路由重发)。
-    pub(crate) fn sweep_expired_route_info(&mut self, now_ms: u64) -> bool {
+    pub(crate) fn sweep_expired_route_info(&mut self, now_ms: u64) -> SweepOutcome {
+        let relay_peer_routes = self.relay_peer_routes;
         let group_keys: Vec<String> = self.groups.keys().cloned().collect();
-        let mut any_changed = false;
+        let mut route_changed = false;
+        let mut dead_direct_peers: Vec<String> = Vec::new();
         for group_key in group_keys {
+            // Pass 1: 半开直连检测。会话 90s 无任何收包即视为半开连接,
+            // 执行完整 remove_peer(含孤儿第三方清理与拓扑版本推进)。
+            let dead_direct: Vec<PeerId> = {
+                let g = self.groups.get(&group_key).expect("group exists");
+                g.peers
+                    .iter()
+                    .copied()
+                    .filter(|pid| {
+                        !g.sessions.get(pid).is_some_and(|s| {
+                            now_ms.saturating_sub(s.last_touch_ms)
+                                <= REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS
+                        })
+                    })
+                    .collect()
+            };
+            for pid in dead_direct {
+                self.remove_peer(&group_key, pid);
+                // "网络\u{1f}peer_id":宿主据此关闭对应 WebSocket。
+                dead_direct_peers.push(format!("{}\u{1f}{}", group_key, pid));
+                route_changed = true;
+            }
             let g = self.groups.get_mut(&group_key).expect("group exists");
             // 网关 liveness 以会话最近同步时间为准:在线网关每 ~60s
             // (上游已存版本 TTL)至少会重发一次全量路由,90s 窗口足够。
@@ -348,6 +401,10 @@ impl RouteState {
                     }
                     let reachable = if g.peers.contains(pid) {
                         alive_gateways.contains(pid)
+                    } else if !relay_peer_routes {
+                        // 链式接入关闭:第三方条目没有合法来源,一律不可达,
+                        // 兼容从开关开启切换到关闭后的历史残留清理。
+                        false
                     } else {
                         g.gateway_links.iter().any(|(gateway, links)| {
                             links.contains(pid)
@@ -377,9 +434,12 @@ impl RouteState {
                 g.peers.contains(gateway) && alive_gateways.contains(gateway) && !links.is_empty()
             });
             Self::note_topology_change(g);
-            any_changed = true;
+            route_changed = true;
         }
-        any_changed
+        SweepOutcome {
+            route_changed,
+            dead_direct_peers,
+        }
     }
 
     /// 查询到达目标节点的下一跳。直连节点返回自身;链式接入的第三方
@@ -524,10 +584,13 @@ impl RouteState {
         let g = self.ensure_group(group_key);
 
         // 先更新会话，避免与后续可变借用冲突。
+        // 注意:这里绝不刷新 last_touch_ms——会话活跃度只能以"收到对端
+        // 数据"(请求/响应/ack)为准;若发送侧也刷新,半开连接(close 事件
+        // 丢失)会被服务端自己的周期重发永远保持"活跃",sweep 永远
+        // 检测不到它。
         {
             let session = g.sessions.entry(target_peer_id).or_default();
             session.my_session_id = Some(server_session_id);
-            session.last_touch_ms = now_ms;
         }
 
         let force_full_local = {
@@ -655,6 +718,7 @@ impl RouteState {
         // 与解码结果同序的原始条目字节,用于第三方路由的保真转播。
         let raw_items = extract_route_peer_info_items(request_bytes);
 
+        let relay_peer_routes = self.relay_peer_routes;
         let g = self.ensure_group(group_key);
 
         let session_changed = {
@@ -682,12 +746,34 @@ impl RouteState {
             for (index, info) in infos.items.iter().enumerate() {
                 let is_self = info.peer_id == from_peer_id;
                 if !is_self {
-                    // 链式接入的第三方条目:仅接受已认证网关代发、
-                    // 且不冒充直连节点或本中继的条目。
+                    // 链式接入的第三方条目。
+                    if !relay_peer_routes {
+                        // RELAY_PEER_ROUTES=false(默认):本中继是信令服务器,
+                        // 所有节点直连。第三方条目在此拓扑下没有合法来源,
+                        // 只能是服务端重启后客户端缓存回传的陈旧路由(典型
+                        // 形态:携带早已离线节点的 peer_infos),一律拒收。
+                        continue;
+                    }
+                    // 仅接受已认证网关代发、且不冒充直连节点或本中继的条目。
                     if info.peer_id == 0
                         || info.peer_id == my_peer_id
                         || g.peers.contains(&info.peer_id)
                     {
+                        continue;
+                    }
+                    // 陈旧拒收:活跃网关链路会在转发前刷新条目的
+                    // last_update,超过 RELAY_STALE_AFTER_MS 仍携带原始
+                    // 时间戳的条目必然来自客户端缓存回传。拒收同时不
+                    // 刷新时间戳、不重建 gateway_links,防止死节点
+                    // 被 sweep 清理后又经回传复活。
+                    let stale_ms = info
+                        .last_update
+                        .as_ref()
+                        .map(|ts| {
+                            now_ms.saturating_sub((ts.seconds.max(0) as u64) * 1_000)
+                        })
+                        .unwrap_or(u64::MAX);
+                    if stale_ms > RELAY_STALE_AFTER_MS {
                         continue;
                     }
                     if !g.peer_infos.contains_key(&info.peer_id)
@@ -742,10 +828,15 @@ impl RouteState {
                     }
                 }
                 let mut info = info.clone();
-                info.last_update = Some(crate::proto::Timestamp {
-                    seconds: (now_ms / 1000) as i64,
-                    nanos: 0,
-                });
+                if is_self {
+                    // 仅直连条目沿用服务端接收时间;第三方条目保留上报方
+                    // 携带的原始时间戳,否则会把死条目"洗白"成新鲜数据,
+                    // 使 sweep 的 90s/3660s 过期判断全部失效。
+                    info.last_update = Some(crate::proto::Timestamp {
+                        seconds: (now_ms / 1000) as i64,
+                        nanos: 0,
+                    });
+                }
                 let entry_peer_id = info.peer_id;
                 g.peer_infos.insert(entry_peer_id, info);
                 if let Some(raw) = raw_items.get(index) {
@@ -761,31 +852,35 @@ impl RouteState {
         }
 
         // 合并上报方 conn_info 中其自身的链路视图(仅取以上报方为一端的边),
-        // 使 B--C 等链式链路进入全网拓扑。
-        if let Some(conn) = &req.conn_info {
-            if let Some(reported) = Self::links_reported_by(conn, from_peer_id) {
-                let entry = g.gateway_links.entry(from_peer_id).or_default();
-                let before = entry.clone();
-                for pid in reported {
-                    if pid == my_peer_id || pid == from_peer_id {
-                        continue;
+        // 使 B--C 等链式链路进入全网拓扑。链式接入关闭时不建网关链路。
+        if relay_peer_routes {
+            if let Some(conn) = &req.conn_info {
+                if let Some(reported) = Self::links_reported_by(conn, from_peer_id) {
+                    let entry = g.gateway_links.entry(from_peer_id).or_default();
+                    let before = entry.clone();
+                    for pid in reported {
+                        if pid == my_peer_id || pid == from_peer_id {
+                            continue;
+                        }
+                        if g.peers.contains(&pid) || g.peer_infos.contains_key(&pid) {
+                            entry.insert(pid);
+                        }
                     }
-                    if g.peers.contains(&pid) || g.peer_infos.contains_key(&pid) {
-                        entry.insert(pid);
+                    if *entry != before {
+                        topology_changed = true;
                     }
-                }
-                if *entry != before {
-                    topology_changed = true;
-                }
-                if entry.is_empty() {
-                    g.gateway_links.remove(&from_peer_id);
+                    if entry.is_empty() {
+                        g.gateway_links.remove(&from_peer_id);
+                    }
                 }
             }
         }
 
         // 按所有者版本语义入库上报的 conn 行(含上报方代发的其他节点行),
         // 仅当上报版本更高时覆盖,确保中继转发的永远是最新真实视图。
-        let conn_rows_changed = Self::store_conn_rows(g, req.conn_info.as_ref(), my_peer_id);
+        // 链式接入关闭时只接受直连节点的 conn 行。
+        let conn_rows_changed =
+            Self::store_conn_rows(g, req.conn_info.as_ref(), my_peer_id, relay_peer_routes);
         if need_bump || topology_changed || conn_rows_changed {
             Self::note_topology_change(g);
         }
@@ -896,6 +991,7 @@ impl RouteState {
         g: &mut RouteGroupData,
         conn: Option<&ConnInfo>,
         my_peer_id: PeerId,
+        relay_peer_routes: bool,
     ) -> bool {
         let Some(conn) = conn else {
             return false;
@@ -903,6 +999,10 @@ impl RouteState {
         let mut changed = false;
         let mut accept = |pid: PeerId, version: Version, connected: BTreeSet<PeerId>| {
             if pid == my_peer_id || version == 0 {
+                return;
+            }
+            if !relay_peer_routes && !g.peers.contains(&pid) {
+                // 链式接入关闭:非直连节点的 conn 行一律拒收。
                 return;
             }
             if !g.peers.contains(&pid) && !g.peer_infos.contains_key(&pid) {
@@ -1202,6 +1302,10 @@ mod tests {
             cost: 1,
             hostname: Some(format!("peer-{pid}")),
             noise_static_pubkey: key.to_vec(),
+            last_update: Some(crate::proto::Timestamp {
+                seconds: 1,
+                nanos: 0,
+            }),
             ..Default::default()
         }
     }
@@ -1293,7 +1397,8 @@ mod tests {
     #[test]
     fn gateway_relays_third_party_route() {
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &key(0x22)).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &key(0x22), 1_000).unwrap();
         let req = sync_req(GATEWAY_B, vec![peer_info(CHAINED_C, 1, &key(0x33), 1)], None);
         let outcome = s
             .handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
@@ -1312,8 +1417,9 @@ mod tests {
     #[test]
     fn relayed_info_for_direct_peer_is_ignored() {
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
-        s.add_peer("net", PEER_A, &[]).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
+        s.add_peer("net", PEER_A, &[], 1_000).unwrap();
         let req = sync_req(
             GATEWAY_B,
             vec![peer_info(PEER_A, 99, &key(0x44), 1)],
@@ -1330,7 +1436,8 @@ mod tests {
     #[test]
     fn relayed_info_for_server_identity_is_ignored() {
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
         let req = sync_req(
             GATEWAY_B,
             vec![peer_info(SERVER_ID, 1, &key(0x11), 1)],
@@ -1347,7 +1454,8 @@ mod tests {
         // 对齐上游:同一实例内密钥漂移不再拒绝,路由更新照常接受,
         // 避免网关代发路径被误杀导致客户端重连死循环。
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
         let first = sync_req(
             GATEWAY_B,
             vec![peer_info(CHAINED_C, 1, &key(0x33), 1)],
@@ -1382,21 +1490,21 @@ mod tests {
         // 避免客户端缓存的服务端条目与新实例冲突。
         let mut s = RouteState::new(SERVER_ID);
         s.set_persisted_route_id("net", 0x00ff_00ff_00ff_00ff);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
         let route_id = s.my_peer_route_id("net");
         assert_eq!(route_id, 0x00ff_00ff_00ff_00ff);
 
         // 模拟 DO 重新实例化:新 RouteState + 相同持久化值。
         let mut s2 = RouteState::new(SERVER_ID);
         s2.set_persisted_route_id("net", route_id);
-        s2.add_peer("net", GATEWAY_B, &[]).unwrap();
+        s2.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
         assert_eq!(s2.my_peer_route_id("net"), route_id);
     }
 
     #[test]
     fn peer_route_id_defaults_to_random_when_not_persisted() {
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
         let route_id = s.my_peer_route_id("net");
         assert_ne!(route_id, 0);
         // 同一实例内保持稳定。
@@ -1409,7 +1517,8 @@ mod tests {
         // 首见绑定仅信息性:同一 peer_id 换实例(重启换密钥)后路由更新
         // 照常接受,绑定保留首个值,不再重绑也不拒绝。
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
         let first = sync_req(
             GATEWAY_B,
             vec![peer_info(CHAINED_C, 1, &key(0x33), 1)],
@@ -1445,8 +1554,8 @@ mod tests {
         // 版本与完整邻居集合,不再被服务端虚抬的过期视图覆盖
         // (p2p → 中继 → p2p 震荡的根因)。
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
-        s.add_peer("net", PEER_A, &[]).unwrap();
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
+        s.add_peer("net", PEER_A, &[], 1_000).unwrap();
         let req_a = sync_req(PEER_A, vec![conn_list_peer_info(PEER_A, 1, &key(0x44), 9)], None);
         s.handle_sync_route_info_request("net", PEER_A, &req_a, 1_000)
             .unwrap();
@@ -1458,7 +1567,7 @@ mod tests {
         s.handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
             .unwrap();
         // 新设备 D 加入。
-        s.add_peer("net", GATEWAY_D, &[]).unwrap();
+        s.add_peer("net", GATEWAY_D, &[], 1_000).unwrap();
         let update = s
             .build_sync_route_info_request("net", PEER_A, 9, true, false, 2_000)
             .unwrap();
@@ -1486,8 +1595,8 @@ mod tests {
     fn stale_conn_rows_are_ignored() {
         // 低版本的行上报(乱序/重放)不会覆盖已存的更高版本内容。
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
-        s.add_peer("net", PEER_A, &[]).unwrap();
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
+        s.add_peer("net", PEER_A, &[], 1_000).unwrap();
         let req_a = sync_req(PEER_A, vec![conn_list_peer_info(PEER_A, 1, &key(0x44), 9)], None);
         s.handle_sync_route_info_request("net", PEER_A, &req_a, 1_000)
             .unwrap();
@@ -1510,8 +1619,9 @@ mod tests {
     #[test]
     fn gateway_disconnect_purges_orphaned_third_party() {
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
-        s.add_peer("net", GATEWAY_D, &[]).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
+        s.add_peer("net", GATEWAY_D, &[], 1_000).unwrap();
         let via_b = sync_req(
             GATEWAY_B,
             vec![peer_info(CHAINED_C, 1, &key(0x33), 1)],
@@ -1550,7 +1660,8 @@ mod tests {
     #[test]
     fn outgoing_sync_preserves_raw_third_party_bytes() {
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
         // 构造带未知字段(field 99)的 C 条目原始字节,模拟更新的客户端版本。
         let mut raw_c = peer_info(CHAINED_C, 1, &key(0x33), 1).encode_to_vec();
         push_varint(&mut raw_c, (99 << 3) as u64);
@@ -1569,7 +1680,7 @@ mod tests {
 
         s.handle_sync_route_info_request("net", GATEWAY_B, &body, 1_000)
             .unwrap();
-        s.add_peer("net", PEER_A, &[]).unwrap();
+        s.add_peer("net", PEER_A, &[], 1_000).unwrap();
         let update = s
             .build_sync_route_info_request("net", PEER_A, 9, true, false, 2_000)
             .unwrap();
@@ -1585,8 +1696,9 @@ mod tests {
     #[test]
     fn conn_info_reports_gateway_links() {
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
-        s.add_peer("net", PEER_A, &[]).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
+        s.add_peer("net", PEER_A, &[], 1_000).unwrap();
         let conn = ConnInfo::ConnPeerList(RouteConnPeerList {
             peer_conn_infos: vec![
                 conn_row(SERVER_ID, &[GATEWAY_B]),
@@ -1631,8 +1743,9 @@ mod tests {
     #[test]
     fn bitmap_conn_info_includes_gateway_edges() {
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &[]).unwrap();
-        s.add_peer("net", PEER_A, &[]).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
+        s.add_peer("net", PEER_A, &[], 1_000).unwrap();
         let req = sync_req(
             GATEWAY_B,
             vec![peer_info(CHAINED_C, 1, &key(0x33), 1)],
@@ -1695,7 +1808,8 @@ mod tests {
         // 第三方条目达到 MAX_RELAYED_PEERS 上限后,新增超限条目被跳过,
         // 整次同步不再失败;网关自身(直连)信息照常入库。
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &key(0x22)).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &key(0x22), 1_000).unwrap();
         let items: Vec<RoutePeerInfo> = (0..MAX_RELAYED_PEERS as u32)
             .map(|i| peer_info(1_000 + i, 1, &key((i % 250) as u8), i))
             .collect();
@@ -1730,7 +1844,8 @@ mod tests {
         // 网关 B 异常掉线但 close 事件丢失(不调用 remove_peer),
         // 超过 90s 后其带入的第三方节点 C 应被回收。
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &key(0x22)).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &key(0x22), 1_000).unwrap();
         let req = sync_req(GATEWAY_B, vec![peer_info(CHAINED_C, 1, &key(0x33), 1)], None);
         s.handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
             .unwrap();
@@ -1738,7 +1853,10 @@ mod tests {
 
         // last_update 存储的是秒级时间戳(1000ms→1s),预留秒截断余量。
         let now = REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS + 2_000;
-        assert!(s.sweep_expired_route_info(now));
+        let outcome = s.sweep_expired_route_info(now);
+        // 网关 B 自身作为半开直连被完整移除并上报给宿主关闭连接。
+        assert!(outcome.route_changed);
+        assert_eq!(outcome.dead_direct_peers, vec!["net\u{1f}2".to_string()]);
         let g = s.groups.get("net").unwrap();
         assert!(!g.peer_infos.contains_key(&CHAINED_C));
         assert!(!g.raw_peer_infos.contains_key(&CHAINED_C));
@@ -1749,7 +1867,8 @@ mod tests {
     fn sweep_keeps_third_party_while_gateway_alive() {
         // 网关 B 持续同步(会话保持活跃)时,C 的条目不应被 90s 规则误回收。
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &key(0x22)).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &key(0x22), 1_000).unwrap();
         let req = sync_req(GATEWAY_B, vec![peer_info(CHAINED_C, 1, &key(0x33), 1)], None);
         s.handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
             .unwrap();
@@ -1762,7 +1881,9 @@ mod tests {
         let t = REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS + 2_000;
         s.handle_sync_route_info_request("net", GATEWAY_B, &refresh, t)
             .unwrap();
-        assert!(!s.sweep_expired_route_info(t));
+        let outcome = s.sweep_expired_route_info(t);
+        assert!(!outcome.route_changed);
+        assert!(outcome.dead_direct_peers.is_empty());
         assert!(s.groups["net"].peer_infos.contains_key(&CHAINED_C));
     }
 
@@ -1771,7 +1892,8 @@ mod tests {
         // 超过 REMOVE_DEAD_PEER_INFO_AFTER_MS 未版本续期的条目无条件回收:
         // 即使网关在线并持续重发同版本条目,last_update 也不会刷新。
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", GATEWAY_B, &key(0x22)).unwrap();
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &key(0x22), 1_000).unwrap();
         let req = sync_req(GATEWAY_B, vec![peer_info(CHAINED_C, 1, &key(0x33), 1)], None);
         s.handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
             .unwrap();
@@ -1784,8 +1906,105 @@ mod tests {
         );
         s.handle_sync_route_info_request("net", GATEWAY_B, &refresh, t)
             .unwrap();
-        assert!(s.sweep_expired_route_info(t));
+        let outcome = s.sweep_expired_route_info(t);
+        assert!(outcome.route_changed);
+        assert!(outcome.dead_direct_peers.is_empty());
         assert!(!s.groups["net"].peer_infos.contains_key(&CHAINED_C));
+    }
+
+    #[test]
+    fn relay_disabled_rejects_third_party_entries() {
+        // 默认(RELAY_PEER_ROUTES=false)部署场景:服务端重启后客户端
+        // 回传本地缓存的第三方路由,必须被整体拒收——不存 peer_infos、
+        // 不建 gateway_links;上报方自身的直连信息不受影响。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", GATEWAY_B, &key(0x22), 1_000).unwrap();
+        let req = sync_req(
+            GATEWAY_B,
+            vec![
+                peer_info(CHAINED_C, 1, &key(0x33), 1),
+                peer_info(GATEWAY_B, 2, &key(0x22), 2),
+            ],
+            None,
+        );
+        let outcome = s
+            .handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
+            .unwrap();
+        assert!(outcome.route_changed);
+        let g = s.groups.get("net").unwrap();
+        assert!(!g.peer_infos.contains_key(&CHAINED_C));
+        assert!(!g.raw_peer_infos.contains_key(&CHAINED_C));
+        assert!(!g.authenticated_peer_keys.contains_key(&CHAINED_C));
+        assert!(!g.gateway_links.contains_key(&GATEWAY_B));
+        // 直连信息照常入库。
+        assert!(g
+            .peer_infos
+            .get(&GATEWAY_B)
+            .is_some_and(|info| info.version == 2));
+        // 下一跳不会指向任何网关链路。
+        assert_eq!(s.get_next_hop("net", CHAINED_C), None);
+    }
+
+    #[test]
+    fn relay_disabled_rejects_third_party_conn_rows() {
+        // 链式接入关闭时,非直连节点的 conn 行也一并拒收。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", GATEWAY_B, &[], 1_000).unwrap();
+        let conn = ConnInfo::ConnPeerList(RouteConnPeerList {
+            peer_conn_infos: vec![conn_row_v(CHAINED_C, 9, &[GATEWAY_B])],
+        });
+        let req = sync_req(GATEWAY_B, vec![], Some(conn));
+        s.handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
+            .unwrap();
+        let g = s.groups.get("net").unwrap();
+        assert!(!g.conn_rows.contains_key(&CHAINED_C));
+    }
+
+    #[test]
+    fn stale_third_party_entries_are_rejected() {
+        // 链式接入开启时,原始 last_update 距今超过 30s 的第三方条目
+        // 被拒收:活跃网关会在转发前刷新时间戳,陈旧条目只能来自
+        // 客户端缓存回传(服务端重启场景)。
+        let mut s = RouteState::new(SERVER_ID);
+        s.set_relay_peer_routes(true);
+        s.add_peer("net", GATEWAY_B, &key(0x22), 1_000).unwrap();
+        // 新鲜条目(last_update=60s,距今 60s... 用 10s 内的新鲜值)。
+        let mut fresh = peer_info(CHAINED_C, 1, &key(0x33), 1);
+        fresh.last_update = Some(crate::proto::Timestamp {
+            seconds: 55,
+            nanos: 0,
+        });
+        // 陈旧条目(last_update=1s,距今 59s > 30s)。
+        let stale = peer_info(5_000, 1, &key(0x77), 1);
+        let req = sync_req(GATEWAY_B, vec![fresh, stale], None);
+        let outcome = s
+            .handle_sync_route_info_request("net", GATEWAY_B, &req, 60_000)
+            .unwrap();
+        assert!(outcome.route_changed);
+        let g = s.groups.get("net").unwrap();
+        assert!(g.peer_infos.contains_key(&CHAINED_C));
+        assert!(!g.peer_infos.contains_key(&5_000));
+        // 入库条目保留原始时间戳,不被服务端时间洗白。
+        assert_eq!(g.peer_infos.get(&CHAINED_C).unwrap().last_update.unwrap().seconds, 55);
+    }
+
+    #[test]
+    fn half_open_direct_peer_is_reported_for_close() {
+        // 半开直连(close 事件丢失)在 90s 静默后被完整移除并上报:
+        // 上报格式为 "网络\u001fpeer_id",宿主据此关闭 WebSocket。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", PEER_A, &key(0x44), 1_000).unwrap();
+        let req = sync_req(PEER_A, vec![peer_info(PEER_A, 1, &key(0x44), 9)], None);
+        s.handle_sync_route_info_request("net", PEER_A, &req, 1_000)
+            .unwrap();
+        // 89s:仍在宽限期内。
+        let early = s.sweep_expired_route_info(REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS - 1_000);
+        assert!(early.dead_direct_peers.is_empty());
+        // 91s:上报移除。注:会话 touch 时刻为 1_000,实际静默时长
+        // 以 last_touch 为准,这里用足够大的时间差覆盖秒级截断。
+        let late = s.sweep_expired_route_info(REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS + 2_000);
+        assert_eq!(late.dead_direct_peers, vec!["net\u{1f}4".to_string()]);
+        assert!(!s.groups["net"].peers.contains(&PEER_A));
     }
 
     #[test]
@@ -1793,14 +2012,18 @@ mod tests {
         // 直连节点异常掉线(close 事件丢失)且 90s 无任何同步活动时,
         // 其自身路由条目也应被回收,避免永久残留。
         let mut s = RouteState::new(SERVER_ID);
-        s.add_peer("net", PEER_A, &key(0x44)).unwrap();
+        s.add_peer("net", PEER_A, &key(0x44), 1_000).unwrap();
         let req = sync_req(PEER_A, vec![peer_info(PEER_A, 1, &key(0x44), 9)], None);
         s.handle_sync_route_info_request("net", PEER_A, &req, 1_000)
             .unwrap();
         assert!(s.groups["net"].peer_infos.contains_key(&PEER_A));
         // 预留秒截断余量。
         let t = REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS + 2_000;
-        assert!(s.sweep_expired_route_info(t));
+        let outcome = s.sweep_expired_route_info(t);
+        // 直连节点整体移除并上报:g.peers 也不复存在(不再广播假边)。
+        assert!(outcome.route_changed);
+        assert_eq!(outcome.dead_direct_peers.len(), 1);
         assert!(!s.groups["net"].peer_infos.contains_key(&PEER_A));
+        assert!(!s.groups["net"].peers.contains(&PEER_A));
     }
 }

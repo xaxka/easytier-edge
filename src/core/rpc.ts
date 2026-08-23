@@ -21,7 +21,8 @@ interface RouteSyncState {
 }
 
 interface RouteSyncFailure {
-	peer: RpcPeer;
+	/** 只需网络与节点标识:宿主据此定位并关闭对应连接。 */
+	peer: Pick<RpcPeer, "networkName" | "peerId">;
 	error: Error;
 }
 
@@ -38,14 +39,24 @@ export class EasyTierRpc {
 		hostname: string,
 		serverPeerId: number,
 		disableRelayData = false,
+		relayPeerRoutes = false,
 	) {
 		this.core = new WasmRpcCore(publicKey, hostname, serverPeerId);
 		if (disableRelayData) this.core.set_avoid_relay_data(true);
+		// RELAY_PEER_ROUTES(默认 false):链式接入关闭时拒收一切
+		// 网关代发的第三方路由,防止服务端重启后客户端缓存回传的
+		// 死节点路由被注入并广播。
+		this.core.set_relay_peer_routes(relayPeerRoutes);
 		this.serverPeerId = serverPeerId;
 	}
 
 	addPeer(peer: RpcPeer): void {
-		this.core.add_peer(peer.networkName, peer.peerId, peer.remotePublicKey);
+		this.core.add_peer(
+			peer.networkName,
+			peer.peerId,
+			peer.remotePublicKey,
+			BigInt(Date.now()),
+		);
 		this.routeSyncStates.delete(routeSyncKey(peer));
 	}
 
@@ -70,8 +81,21 @@ export class EasyTierRpc {
 	}
 
 	cleanExpired(now: number): RouteSyncFailure[] {
-		this.core.clean_expired(BigInt(now));
+		const deadDirect = this.core.clean_expired(BigInt(now)) as string[];
 		const failures: RouteSyncFailure[] = [];
+		for (const entry of deadDirect) {
+			// "网络\u001fpeer_id":会话 90s 静默的半开直连节点,
+			// wasm 层已做完整 remove_peer,这里上报宿主关闭连接。
+			const sep = entry.lastIndexOf("\u001f");
+			if (sep <= 0) continue;
+			failures.push({
+				peer: {
+					networkName: entry.slice(0, sep),
+					peerId: Number(entry.slice(sep + 1)),
+			},
+				error: new Error("route synchronization timed out; stale connection purged"),
+			});
+		}
 		for (const state of this.routeSyncStates.values()) {
 			if (!state.inFlight || now - state.sentAt <= ROUTE_SYNC_TIMEOUT_MS) continue;
 			state.inFlight = false;

@@ -25,6 +25,8 @@ export interface ServerConfig {
 	maxFrameBytes: number;
 	maxPendingPerIp: number;
 	connectionMode: ConnectionMode;
+	/** 是否接受网关代发的第三方节点路由(链式接入);默认 false。 */
+	relayPeerRoutes: boolean;
 }
 
 export interface EasyTierEnv {
@@ -38,6 +40,7 @@ export interface EasyTierEnv {
 	MAX_FRAME_BYTES?: string;
 	MAX_PENDING_PER_IP?: string;
 	CONNECTION_MODE?: string;
+	RELAY_PEER_ROUTES?: string;
 }
 
 const UTF8_ENCODER = new TextEncoder();
@@ -87,6 +90,11 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 	// legacy 模式面向无法配置 secure mode 的客户端,传输层不加密,
 	// 身份认证依赖 network_secret 摘要匹配。
 	const connectionMode = parseConnectionMode(env.CONNECTION_MODE);
+	// RELAY_PEER_ROUTES 控制是否接受网关代发的第三方节点路由(链式
+	// 接入)。默认 false:信令服务器拓扑下所有节点直连本中继,第三方
+	// 条目只能来自服务端重启后客户端缓存回传的陈旧路由,接受它们会把
+	// 死节点广播给全网。确有链式网关接入需求时显式设为 true。
+	const relayPeerRoutes = parseBoolean(env.RELAY_PEER_ROUTES, "RELAY_PEER_ROUTES");
 	const hostname = env.EASYTIER_HOSTNAME ?? "edge";
 	if (
 		typeof hostname !== "string" ||
@@ -106,6 +114,7 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 			maxFrameBytes,
 			maxPendingPerIp,
 			connectionMode,
+			relayPeerRoutes,
 		};
 	}
 
@@ -126,6 +135,7 @@ export function readServerConfig(env: EasyTierEnv): ServerConfig {
 		maxFrameBytes,
 		maxPendingPerIp,
 		connectionMode,
+		relayPeerRoutes,
 	};
 }
 

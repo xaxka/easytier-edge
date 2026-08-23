@@ -114,14 +114,21 @@ impl WasmRpcCore {
         Ok(())
     }
 
+    /// RELAY_PEER_ROUTES 开关:是否接受网关代发的第三方节点路由。
+    /// 必须在 add_peer 之前调用;信令服务器拓扑下保持默认关闭。
+    pub fn set_relay_peer_routes(&mut self, enabled: bool) {
+        self.routes.set_relay_peer_routes(enabled);
+    }
+
     pub fn add_peer(
         &mut self,
         network: &str,
         peer_id: u32,
         remote_public_key: &[u8],
+        now_ms: u64,
     ) -> Result<(), JsValue> {
         self.routes
-            .add_peer(network, peer_id, remote_public_key)
+            .add_peer(network, peer_id, remote_public_key, now_ms)
             .map_err(|e| error(&e))?;
         if self.configured_groups.insert(network.to_string()) {
             self.routes
@@ -455,13 +462,16 @@ impl WasmRpcCore {
         Ok(packet.encode_to_vec())
     }
 
-    pub fn clean_expired(&mut self, now_ms: u64) {
+    pub fn clean_expired(&mut self, now_ms: u64) -> Vec<String> {
         self.clean_rpc_state(now_ms);
         // 由宿主每 10s 的维护定时器调用:基于 last_update 回收
         // 失去在线网关支撑/长期未续期的路由条目,防止异常掉线
-        // (close 事件丢失)的网关残留第三方节点、占用中继额度。
-        self.routes.sweep_expired_route_info(now_ms);
+        // (close 事件丢失)的网关残留第三方节点、占用中继额度;
+        // 同时返回会话静默超时的半开直连节点("网络\u{1f}peer_id"),
+        // 宿主应关闭其 WebSocket 连接。
+        let outcome = self.routes.sweep_expired_route_info(now_ms);
         self.peer_center.clean_outdated(PEER_CENTER_TTL_SECONDS);
+        outcome.dead_direct_peers
     }
 }
 

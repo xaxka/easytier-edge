@@ -113,6 +113,7 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			this.config.hostname,
 			SERVER_PEER_ID,
 			this.config.disableRelayData,
+			this.config.relayPeerRoutes,
 		);
 		await this.restoreRouteIds();
 	}
@@ -513,7 +514,10 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			this.maintenanceTimer = null;
 			const now = Date.now();
 			for (const failure of this.rpc.cleanExpired(now)) {
-				console.error("route synchronization retry failed", {
+				// 两类来源:同步重试超时,以及会话静默 90s 的半开连接
+				// (close 事件丢失)。后者的路由状态已在 wasm 层完整清理,
+				// 这里只负责关闭对应的 WebSocket 促使对端重连。
+				console.error("route synchronization failure", {
 					networkName: failure.peer.networkName,
 					peerId: failure.peer.peerId,
 					error: failure.error.message,
