@@ -1705,8 +1705,9 @@ mod tests {
             .unwrap();
         assert!(outcome.route_changed);
 
-        // 第二批次:一个超限的新第三方条目 + 网关自身的直连信息更新。
-        let extra = peer_info(5_000, 1, &key(0x77), 1);
+        // 第二批次:一个全新的超限第三方条目(9_000 不在首批范围内)
+        // + 网关自身的直连信息更新。
+        let extra = peer_info(9_000, 1, &key(0x77), 1);
         let direct = peer_info(GATEWAY_B, 2, &key(0x22), 2);
         let req2 = sync_req(GATEWAY_B, vec![extra, direct], None);
         let outcome2 = s
@@ -1715,7 +1716,7 @@ mod tests {
         assert!(outcome2.route_changed);
         let g = s.groups.get("net").unwrap();
         assert!(
-            !g.peer_infos.contains_key(&5_000),
+            !g.peer_infos.contains_key(&9_000),
             "over-capacity third-party entry must be skipped"
         );
         assert!(
