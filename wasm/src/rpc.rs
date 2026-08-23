@@ -457,6 +457,10 @@ impl WasmRpcCore {
 
     pub fn clean_expired(&mut self, now_ms: u64) {
         self.clean_rpc_state(now_ms);
+        // 由宿主每 10s 的维护定时器调用:基于 last_update 回收
+        // 失去在线网关支撑/长期未续期的路由条目,防止异常掉线
+        // (close 事件丢失)的网关残留第三方节点、占用中继额度。
+        self.routes.sweep_expired_route_info(now_ms);
         self.peer_center.clean_outdated(PEER_CENTER_TTL_SECONDS);
     }
 }

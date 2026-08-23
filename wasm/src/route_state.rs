@@ -56,6 +56,14 @@ const SAVED_ROUTE_VERSION_TTL_MS: u64 = 60_000;
 /// 单个网络分组允许的链式接入(经网关转发的第三方)节点数上限,
 /// 防止已认证节点用伪造路由撑爆内存。
 const MAX_RELAYED_PEERS: usize = 4_096;
+/// 上游 REMOVE_UNREACHABLE_PEER_INFO_AFTER(90s):失去可达性
+/// (直连会话停止同步 / 无在线网关链路)且信息超过此时限的条目被回收,
+/// 覆盖网关异常掉线而 close 事件丢失、remove_peer 未被触发的场景。
+const REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS: u64 = 90_000;
+/// 上游 REMOVE_DEAD_PEER_INFO_AFTER(3660s):超过一个
+/// UPDATE_PEER_INFO_PERIOD(3600s)未发生版本续期的条目无条件回收,
+/// 防止僵尸条目长期占用 MAX_RELAYED_PEERS 额度并污染路由。
+const REMOVE_DEAD_PEER_INFO_AFTER_MS: u64 = 3_660_000;
 
 /// 单个节点的连接行:该节点直连的邻居集合与它自己维护的版本号。
 /// 语义对齐上游 RouteConnInfo:版本仅由行所有者在自身连接集合变化时
@@ -293,6 +301,85 @@ impl RouteState {
             Self::update_my_conn_row(g, my_peer_id);
             Self::note_topology_change(g);
         }
+    }
+
+    /// 定期回收过期路由信息(对齐上游 clear_expired_peer):
+    /// - 直连节点:信息超过 REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS
+    ///   且会话最近同步已超时(90s 无任何同步活动)时回收——覆盖
+    ///   WebSocket close 事件丢失、remove_peer 未被调用的异常掉线;
+    /// - 链式第三方节点:失去在线网关链路支撑超过 90s 即回收;
+    /// - 任何条目超过 REMOVE_DEAD_PEER_INFO_AFTER_MS(3660s)
+    ///   无条件回收(正常节点每 3600s 至少版本续期一次)。
+    /// 返回是否有条目被回收(调用方可用于决定是否触发路由重发)。
+    pub(crate) fn sweep_expired_route_info(&mut self, now_ms: u64) -> bool {
+        let group_keys: Vec<String> = self.groups.keys().cloned().collect();
+        let mut any_changed = false;
+        for group_key in group_keys {
+            let g = self.groups.get_mut(&group_key).expect("group exists");
+            // 网关 liveness 以会话最近同步时间为准:在线网关每 ~60s
+            // (上游已存版本 TTL)至少会重发一次全量路由,90s 窗口足够。
+            let alive_gateways: BTreeSet<PeerId> = g
+                .peers
+                .iter()
+                .copied()
+                .filter(|pid| {
+                    g.sessions.get(pid).is_some_and(|s| {
+                        now_ms.saturating_sub(s.last_touch_ms)
+                            <= REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS
+                    })
+                })
+                .collect();
+            let age_ms = |info: &RoutePeerInfo| -> u64 {
+                info.last_update
+                    .as_ref()
+                    .map(|ts| now_ms.saturating_sub((ts.seconds.max(0) as u64) * 1_000))
+                    .unwrap_or(u64::MAX)
+            };
+            let purge: Vec<PeerId> = g
+                .peer_infos
+                .iter()
+                .filter_map(|(pid, info)| {
+                    let age = age_ms(info);
+                    if age <= REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS {
+                        return None;
+                    }
+                    if age > REMOVE_DEAD_PEER_INFO_AFTER_MS {
+                        return Some(*pid);
+                    }
+                    let reachable = if g.peers.contains(pid) {
+                        alive_gateways.contains(pid)
+                    } else {
+                        g.gateway_links.iter().any(|(gateway, links)| {
+                            links.contains(pid)
+                                && g.peers.contains(gateway)
+                                && alive_gateways.contains(gateway)
+                        })
+                    };
+                    (!reachable).then_some(*pid)
+                })
+                .collect();
+            if purge.is_empty() {
+                continue;
+            }
+            for pid in &purge {
+                g.peer_infos.remove(pid);
+                g.raw_peer_infos.remove(pid);
+                g.authenticated_peer_keys.remove(pid);
+                g.conn_rows.remove(pid);
+                for session in g.sessions.values_mut() {
+                    session.peer_info_ver_map.remove(pid);
+                    session.last_topology_version = 0;
+                }
+            }
+            // 同步剔除失效网关的链路与已回收节点的引用,避免残留拓扑。
+            g.gateway_links.retain(|gateway, links| {
+                links.retain(|pid| g.peer_infos.contains_key(pid) || g.peers.contains(pid));
+                g.peers.contains(gateway) && alive_gateways.contains(gateway) && !links.is_empty()
+            });
+            Self::note_topology_change(g);
+            any_changed = true;
+        }
+        any_changed
     }
 
     /// 查询到达目标节点的下一跳。直连节点返回自身;链式接入的第三方
@@ -588,6 +675,9 @@ impl RouteState {
         let mut route_changed = false;
         let mut topology_changed = false;
         let mut need_bump = false;
+        // 已中继的第三方条目计数,请求处理过程中按插入增量维护,
+        // 避免每个候选条目都做一次 O(n) 全表扫描。
+        let mut relayed_count = Self::relayed_peer_count(g);
         if let Some(infos) = &req.peer_infos {
             for (index, info) in infos.items.iter().enumerate() {
                 let is_self = info.peer_id == from_peer_id;
@@ -601,9 +691,11 @@ impl RouteState {
                         continue;
                     }
                     if !g.peer_infos.contains_key(&info.peer_id)
-                        && Self::relayed_peer_count(g) >= MAX_RELAYED_PEERS
+                        && relayed_count >= MAX_RELAYED_PEERS
                     {
-                        return Err("relayed route capacity exceeded".to_string());
+                        // 容量超限时只跳过该新增条目,不让整次同步失败:
+                        // 网关注入的第三方条目超限不应连累同批次的合法直连路由。
+                        continue;
                     }
                 }
                 if is_self {
@@ -661,6 +753,9 @@ impl RouteState {
                 }
                 if is_new {
                     need_bump = true;
+                    if !g.peers.contains(&entry_peer_id) {
+                        relayed_count += 1;
+                    }
                 }
             }
         }
@@ -961,7 +1056,9 @@ impl RouteState {
         };
 
         for (i, (_, _, connected)) in rows.iter().enumerate() {
-            set_bit(&mut bitmap, i, i);
+            // 与上游一致只编码真实边,不置自环位:置位后客户端用
+            // get_connected_peers 解码会把节点自己读进 connected 集合,
+            // 属于编码语义偏差的脏数据。
             for link in connected {
                 if let Some(&j) = idx_by_peer.get(link) {
                     set_bit(&mut bitmap, i, j);
@@ -1068,7 +1165,8 @@ fn extract_route_peer_info_items(request_bytes: &[u8]) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnInfo, PeerId, PeerIdVersion, RouteConnPeerList, RoutePeerInfo, RouteState,
+        ConnInfo, MAX_RELAYED_PEERS, PeerId, PeerIdVersion, REMOVE_DEAD_PEER_INFO_AFTER_MS,
+        REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS, RouteConnPeerList, RoutePeerInfo, RouteState,
         SyncRouteInfoRequest, extract_route_peer_info_items, push_len_delimited, push_varint,
         read_varint, route_conn_peer_list, validate_or_bind_reported_key,
     };
@@ -1562,7 +1660,7 @@ mod tests {
             let bit = idx(a) * n + idx(b);
             bitmap.bitmap[bit / 8] & (1 << (bit % 8)) != 0
         };
-        // 星型边 + 网关边 + 自环;本中继不直连 C。
+        // 星型边 + 网关边;本中继不直连 C。
         assert!(linked(SERVER_ID, GATEWAY_B));
         assert!(linked(GATEWAY_B, SERVER_ID));
         assert!(linked(SERVER_ID, PEER_A));
@@ -1570,8 +1668,10 @@ mod tests {
         assert!(linked(CHAINED_C, GATEWAY_B));
         assert!(!linked(SERVER_ID, CHAINED_C));
         assert!(!linked(PEER_A, CHAINED_C));
+        // 自环位不置位,对齐上游编码:置位会被上游 get_connected_peers
+        // 把节点自己解码进 connected 集合,属于语义偏差的脏数据。
         for pv in &bitmap.peer_ids {
-            assert!(linked(pv.peer_id, pv.peer_id));
+            assert!(!linked(pv.peer_id, pv.peer_id));
         }
     }
 
@@ -1588,5 +1688,118 @@ mod tests {
         let mut buf = Vec::new();
         push_varint(&mut buf, u64::MAX);
         assert!(read_varint(&buf[..buf.len() - 1], &mut 0).is_none());
+    }
+
+    #[test]
+    fn relay_capacity_overflow_skips_new_entries_but_keeps_legit_route() {
+        // 第三方条目达到 MAX_RELAYED_PEERS 上限后,新增超限条目被跳过,
+        // 整次同步不再失败;网关自身(直连)信息照常入库。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", GATEWAY_B, &key(0x22)).unwrap();
+        let items: Vec<RoutePeerInfo> = (0..MAX_RELAYED_PEERS as u32)
+            .map(|i| peer_info(1_000 + i, 1, &key((i % 250) as u8), i))
+            .collect();
+        let req = sync_req(GATEWAY_B, items, None);
+        let outcome = s
+            .handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
+            .unwrap();
+        assert!(outcome.route_changed);
+
+        // 第二批次:一个超限的新第三方条目 + 网关自身的直连信息更新。
+        let extra = peer_info(5_000, 1, &key(0x77), 1);
+        let direct = peer_info(GATEWAY_B, 2, &key(0x22), 2);
+        let req2 = sync_req(GATEWAY_B, vec![extra, direct], None);
+        let outcome2 = s
+            .handle_sync_route_info_request("net", GATEWAY_B, &req2, 2_000)
+            .unwrap();
+        assert!(outcome2.route_changed);
+        let g = s.groups.get("net").unwrap();
+        assert!(
+            !g.peer_infos.contains_key(&5_000),
+            "over-capacity third-party entry must be skipped"
+        );
+        assert!(
+            g.peer_infos.contains_key(&GATEWAY_B),
+            "direct peer info must not be lost by a capacity error"
+        );
+    }
+
+    #[test]
+    fn sweep_expired_purges_third_party_after_gateway_silent_disconnect() {
+        // 网关 B 异常掉线但 close 事件丢失(不调用 remove_peer),
+        // 超过 90s 后其带入的第三方节点 C 应被回收。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", GATEWAY_B, &key(0x22)).unwrap();
+        let req = sync_req(GATEWAY_B, vec![peer_info(CHAINED_C, 1, &key(0x33), 1)], None);
+        s.handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
+            .unwrap();
+        assert!(s.groups["net"].peer_infos.contains_key(&CHAINED_C));
+
+        // last_update 存储的是秒级时间戳(1000ms→1s),预留秒截断余量。
+        let now = REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS + 2_000;
+        assert!(s.sweep_expired_route_info(now));
+        let g = s.groups.get("net").unwrap();
+        assert!(!g.peer_infos.contains_key(&CHAINED_C));
+        assert!(!g.raw_peer_infos.contains_key(&CHAINED_C));
+        assert!(!g.authenticated_peer_keys.contains_key(&CHAINED_C));
+    }
+
+    #[test]
+    fn sweep_keeps_third_party_while_gateway_alive() {
+        // 网关 B 持续同步(会话保持活跃)时,C 的条目不应被 90s 规则误回收。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", GATEWAY_B, &key(0x22)).unwrap();
+        let req = sync_req(GATEWAY_B, vec![peer_info(CHAINED_C, 1, &key(0x33), 1)], None);
+        s.handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
+            .unwrap();
+        // 网关按上游节奏持续同步(自身信息版本更新即可刷新会话活跃度)。
+        let refresh = sync_req(
+            GATEWAY_B,
+            vec![peer_info(GATEWAY_B, 2, &key(0x22), 2)],
+            None,
+        );
+        let t = REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS + 2_000;
+        s.handle_sync_route_info_request("net", GATEWAY_B, &refresh, t)
+            .unwrap();
+        assert!(!s.sweep_expired_route_info(t));
+        assert!(s.groups["net"].peer_infos.contains_key(&CHAINED_C));
+    }
+
+    #[test]
+    fn sweep_purges_dead_entries_even_when_gateway_alive() {
+        // 超过 REMOVE_DEAD_PEER_INFO_AFTER_MS 未版本续期的条目无条件回收:
+        // 即使网关在线并持续重发同版本条目,last_update 也不会刷新。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", GATEWAY_B, &key(0x22)).unwrap();
+        let req = sync_req(GATEWAY_B, vec![peer_info(CHAINED_C, 1, &key(0x33), 1)], None);
+        s.handle_sync_route_info_request("net", GATEWAY_B, &req, 1_000)
+            .unwrap();
+        // 预留秒截断余量,确保 age 严格大于 3660s。
+        let t = REMOVE_DEAD_PEER_INFO_AFTER_MS + 2_000;
+        let refresh = sync_req(
+            GATEWAY_B,
+            vec![peer_info(GATEWAY_B, 2, &key(0x22), 2)],
+            None,
+        );
+        s.handle_sync_route_info_request("net", GATEWAY_B, &refresh, t)
+            .unwrap();
+        assert!(s.sweep_expired_route_info(t));
+        assert!(!s.groups["net"].peer_infos.contains_key(&CHAINED_C));
+    }
+
+    #[test]
+    fn sweep_purges_silent_direct_peer_route_info() {
+        // 直连节点异常掉线(close 事件丢失)且 90s 无任何同步活动时,
+        // 其自身路由条目也应被回收,避免永久残留。
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", PEER_A, &key(0x44)).unwrap();
+        let req = sync_req(PEER_A, vec![peer_info(PEER_A, 1, &key(0x44), 9)], None);
+        s.handle_sync_route_info_request("net", PEER_A, &req, 1_000)
+            .unwrap();
+        assert!(s.groups["net"].peer_infos.contains_key(&PEER_A));
+        // 预留秒截断余量。
+        let t = REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS + 2_000;
+        assert!(s.sweep_expired_route_info(t));
+        assert!(!s.groups["net"].peer_infos.contains_key(&PEER_A));
     }
 }
