@@ -1,6 +1,6 @@
 import { type RpcPeer } from "../core/rpc";
 import { WS_OPEN } from "../core/constants";
-import { type SecurePeer } from "../wasm";
+import { type LegacyCipher, type SecurePeer } from "../wasm";
 
 type ConnectionPhase = "msg1" | "msg3" | "ready" | "closed";
 
@@ -10,6 +10,12 @@ export type HandshakeMode = "secure" | "legacy";
 export interface Connection extends RpcPeer {
 	socket: WebSocket;
 	secure: SecurePeer;
+	/**
+	 * legacy 模式下用 `derive_key_128(network_secret)` 派生的
+	 * AES-128-GCM 加密器,加/解密上游 `enable_encryption=true` 客户端
+	 * 默认开启的直达 RPC 加密。secure 模式不使用本字段。
+	 */
+	legacyCipher: LegacyCipher | null;
 	remotePublicKey: Uint8Array;
 	phase: ConnectionPhase;
 	mode: HandshakeMode;
@@ -34,6 +40,7 @@ export function createConnection(
 	const connection: Connection = {
 		socket,
 		secure,
+		legacyCipher: null,
 		remotePublicKey: new Uint8Array(),
 		phase: "msg1",
 		mode: "secure",
@@ -45,10 +52,16 @@ export function createConnection(
 		sendWindowStartedAt: Date.now(),
 		sentBytesInWindow: 0,
 		sentFramesInWindow: 0,
-		// legacy 连接没有会话密钥,控制面帧按明文直通;
-		// secure 连接在握手完成后用 AEAD 加密。
+		// legacy 连接的直达 RPC 由上游 `RpcTransport::send` 用
+		// network_secret 派生的 AES-128-GCM 密钥加密,本字段在
+		// `handleLegacyHandshake` 成功时由调用方注入 `LegacyCipher`
+		// 实例,使回程帧走对称加密;secure 连接走 Noise XX 会话密钥。
 		encrypt: (packet) =>
-			connection.mode === "legacy" ? packet : connection.secure.encrypt_packet(packet),
+			connection.mode === "legacy"
+				? connection.legacyCipher !== null
+					? connection.legacyCipher.encrypt_packet(packet)
+					: packet
+				: connection.secure.encrypt_packet(packet),
 		send: (packet) => sendConnection(connection, packet),
 	};
 	connection.handshakeTimer = setTimeout(
@@ -68,6 +81,8 @@ export function disposeConnection(connection: Connection): void {
 	if (connection.handshakeTimer !== null) clearTimeout(connection.handshakeTimer);
 	connection.handshakeTimer = null;
 	connection.secure.free();
+	connection.legacyCipher?.free();
+	connection.legacyCipher = null;
 }
 
 function sendConnection(connection: Connection, packet: Uint8Array): void {

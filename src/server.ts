@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import {
+	LegacyCipher,
 	SecurePeer,
 	build_legacy_handshake_response,
 	generate_keypair,
@@ -286,6 +287,12 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 	 * 客户端发送明文 `HandshakeRequest`(含 network_name 与 network_secret
 	 * 摘要),服务端校验房间与摘要后回发自身的 `HandshakeRequest`。
 	 * 该路径面向无法配置 secure mode 的客户端,由 CONNECTION_MODE 启用。
+	 *
+	 * 注意:上游 `gen_default_flags()` 默认 `enable_encryption = true`,
+	 * `encryption_algorithm = "aes-gcm"`,即便没有 secure mode 也会用
+	 * `derive_key_128(network_secret)` 派生的 AES-128-GCM 密钥加密直达
+	 * RPC(包括握手后立即发起的首个 route sync)。因此 legacy 握手成功
+	 * 后必须为连接注入 `LegacyCipher`,使后续直达 RPC 能正常加解密。
 	 */
 	private handleLegacyHandshake(
 		connection: Connection,
@@ -315,6 +322,7 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		connection.peerId = info.peerId;
 		connection.networkName = info.networkName;
 		connection.mode = "legacy";
+		connection.legacyCipher = new LegacyCipher(room.network_secret);
 		connection.send(
 			build_legacy_handshake_response(
 				SERVER_PEER_ID,
@@ -416,11 +424,23 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		const encrypted = (header.flags & ENCRYPTED_FLAG) !== 0;
 		let clearPacket: ReturnType<typeof parsePacket>;
 		if (connection.mode === "legacy") {
-			// legacy 连接没有会话密钥:直达 RPC 必须保持明文。
-			if (encrypted) {
-				throw new Error("legacy connections must not send encrypted direct RPC packets");
+			// 上游 EasyTier 默认 `enable_encryption = true`,legacy 客户端
+			// 的直达 RPC(`RpcTransport::send`)用 `derive_key_128(network_secret)`
+			// 派生的 AES-128-GCM 密钥加密。本服务在 `handleLegacyHandshake`
+			// 已为连接注入对应的 `LegacyCipher`,这里解密并把帧还原成
+			// `parsePacket` 友好的明文形式。未置 ENCRYPTED_FLAG 的帧
+			// (例如上游关掉 `enable_encryption` 的客户端)按明文直通,
+			// `LegacyCipher.decrypt_packet` 也会原样返回。
+			if (!connection.legacyCipher) {
+				throw new Error("legacy connection is missing its network-secret cipher");
 			}
-			clearPacket = packet;
+			if (encrypted) {
+				const clear = connection.legacyCipher.decrypt_packet(frame);
+				if (clear.byteLength === 0) return;
+				clearPacket = parsePacket(clear);
+			} else {
+				clearPacket = packet;
+			}
 		} else {
 			if (!encrypted) {
 				throw new Error("secure_mode requires encrypted direct RPC packets");

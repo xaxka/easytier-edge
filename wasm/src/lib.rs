@@ -7,7 +7,7 @@ mod rpc;
 mod secure;
 
 pub use legacy::{
-    build_legacy_handshake_response, network_secret_digest, parse_legacy_handshake,
+    LegacyCipher, build_legacy_handshake_response, network_secret_digest, parse_legacy_handshake,
     verify_network_secret_digest,
 };
 pub use packet::{

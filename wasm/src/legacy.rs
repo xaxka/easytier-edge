@@ -1,15 +1,24 @@
-//! EasyTier 旧版(非安全模式)握手支持。
+//! EasyTier 旧版(非安全模式)握手与直达 RPC 加密支持。
 //!
 //! 移植上游 EasyTier 2.6.4 `peer_conn.rs` 中的 legacy 握手:
 //! 客户端发送 `PacketType::HandShake`(=2)帧,负载为 protobuf
 //! `HandshakeRequest`;服务端校验 `network_name` 与
 //! `network_secret_digest`(SipHash-1-3 分片摘要)后回发自身的
-//! `HandshakeRequest`。该模式面向无法配置 secure mode 的客户端,
-//! 传输层不加密,身份认证仅依赖 network_secret 摘要匹配。
+//! `HandshakeRequest`。该模式面向无法配置 secure mode 的客户端。
+//!
+//! 重要:上游 `gen_default_flags()` 默认 `enable_encryption = true`,
+//! `encryption_algorithm = "aes-gcm"`。即使客户端未启用 secure mode,
+//! `RpcTransport::send` 仍会用 `derive_key_128(network_secret)` 派生的
+//! AES-128-GCM 密钥加密直达 RPC 帧(对端尚未在 route 缓存里被标记为
+//! public server 时一律加密,首个 route sync RPC 必然落入此路径)。
+//! 本模块的 `LegacyCipher` 与上游 `tunnel::encrypt::{derive_key_128,
+//! AesGcmCipher}` 完全一致,允许服务端解密 legacy 客户端直达 RPC,
+//! 同时回程也用同一密钥加密,保持双向兼容。
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher as _;
 
+use aes_gcm::{AeadInPlace as _, Aes128Gcm, KeyInit as _, Nonce, aead::generic_array::GenericArray};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use prost::Message as _;
 use serde::Serialize;
@@ -238,6 +247,123 @@ fn display_error(error: impl std::fmt::Display) -> JsValue {
     js_error(error.to_string())
 }
 
+/// 与上游 `tunnel::encrypt::derive_key_128` 完全一致的密钥派生。
+///
+/// 上游用 `std::collections::hash_map::DefaultHasher`(SipHash-1-3,零密钥)
+/// 对 `network_secret` 哈希,然后做两轮反馈式扩展到 16 字节。
+/// 此函数被 `LegacyCipher` 用作 AES-128-GCM 的对称密钥。
+pub(crate) fn derive_key_128(secret: &str) -> [u8; 16] {
+    let mut key = [0_u8; 16];
+    let mut hasher = DefaultHasher::new();
+    hasher.write(secret.as_bytes());
+    key[0..8].copy_from_slice(&hasher.finish().to_be_bytes());
+    hasher.write(&key[0..8]);
+    key[8..16].copy_from_slice(&hasher.finish().to_be_bytes());
+    hasher.write(&key);
+    key
+}
+
+/// 上游 `StandardAeadTail = AeadTail<16, 12>`:16 字节 GCM tag + 12 字节 nonce。
+pub const LEGACY_AEAD_TAG_SIZE: usize = 16;
+pub const LEGACY_AEAD_NONCE_SIZE: usize = 12;
+pub const LEGACY_AEAD_TAIL_SIZE: usize = LEGACY_AEAD_TAG_SIZE + LEGACY_AEAD_NONCE_SIZE;
+
+/// 旧版 RPC 加密器:用 `derive_key_128(network_secret)` 派生的
+/// AES-128-GCM 密钥加/解密 EasyTier 直达控制面帧。
+///
+/// 与上游 `tunnel::encrypt::AesGcmCipher` 行为一致:
+/// - 加密:对 payload(不含 16 字节 peer-manager 头)做 AES-128-GCM,
+///   追加 16 字节 tag + 12 字节随机 nonce,并在头 flags 中置 `ENCRYPTED_FLAG`。
+/// - 解密:从帧尾截取 tag+nonce,对 payload 做反向 AEAD,清掉 `ENCRYPTED_FLAG`。
+///
+/// 服务端仅在 `CONNECTION_MODE=legacy` 时使用本加密器,与上游
+/// `enable_encryption = true`(默认)、`encryption_algorithm = "aes-gcm"`(默认)
+/// 的非 secure-mode 客户端互通。
+#[wasm_bindgen]
+pub struct LegacyCipher {
+    key_128: [u8; 16],
+}
+
+#[wasm_bindgen]
+impl LegacyCipher {
+    /// 用 `network_secret` 派生 AES-128-GCM 密钥。
+    #[wasm_bindgen(constructor)]
+    pub fn new(network_secret: &str) -> Result<LegacyCipher, JsValue> {
+        if network_secret.is_empty() {
+            return Err(js_error("network_secret must not be empty"));
+        }
+        Ok(Self {
+            key_128: derive_key_128(network_secret),
+        })
+    }
+
+    /// 加密一帧未带 AEAD 尾的 EasyTier 包(16 字节头 + 明文 payload)。
+    /// 返回 16 字节头(置 ENCRYPTED_FLAG) + 密文 + 16 字节 tag + 12 字节 nonce,
+    /// 与上游 `AesGcmCipher::encrypt_with_nonce(None)` 一致。
+    pub fn encrypt_packet(&self, packet: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if packet.len() < HEADER_SIZE {
+            return Err(js_error("legacy packet is shorter than the EasyTier header"));
+        }
+        let mut output = packet.to_vec();
+        let mut nonce_bytes = [0_u8; LEGACY_AEAD_NONCE_SIZE];
+        getrandom::fill(&mut nonce_bytes).map_err(display_error)?;
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let cipher = Aes128Gcm::new(GenericArray::from_slice(&self.key_128));
+        let tag = cipher
+            .encrypt_in_place_detached(nonce, &[], &mut output[HEADER_SIZE..])
+            .map_err(|_| js_error("legacy AES-128-GCM encryption failed"))?;
+        output.extend_from_slice(tag.as_slice());
+        output.extend_from_slice(&nonce_bytes);
+        // 头 flags 字节置 ENCRYPTED_FLAG,其它位保留(便于上游 set_compressed 等
+        // 控制位与加密共存,虽然 legacy 直达 RPC 路径目前不会同时压缩)。
+        output[9] |= ENCRYPTED_FLAG;
+        // peer-manager 头中的 len 字段仍指 payload 长度,与上游
+        // `PeerManagerHeader::len` 语义一致(不含 tag+nonce)。这里不重写 len,
+        // 让解析层依据 flags & ENCRYPTED_FLAG 判断需要 28 字节尾。
+        Ok(output)
+    }
+
+    /// 解密一帧带 AEAD 尾的 EasyTier 包(16 字节头 + 密文 + 16 字节 tag +
+    /// 12 字节 nonce)。返回 16 字节头(清 ENCRYPTED_FLAG) + 明文 payload。
+    /// 若包未置 ENCRYPTED_FLAG 则原样返回,便于调用方在两种 flag 路径间统一。
+    pub fn decrypt_packet(&self, packet: &[u8]) -> Result<Vec<u8>, JsValue> {
+        if packet.len() < HEADER_SIZE {
+            return Err(js_error("legacy encrypted packet is shorter than the EasyTier header"));
+        }
+        let header = PacketHeader::from_bytes(packet).map_err(js_error)?;
+        if header.flags & ENCRYPTED_FLAG == 0 {
+            return Ok(packet.to_vec());
+        }
+        if packet.len() < HEADER_SIZE + LEGACY_AEAD_TAIL_SIZE {
+            return Err(js_error("legacy encrypted packet is missing the AEAD tail"));
+        }
+        let ciphertext_len = packet.len() - HEADER_SIZE - LEGACY_AEAD_TAIL_SIZE;
+        // 上游 `PeerManagerHeader::len` 字段记录的是密文长度(不含 tag+nonce)。
+        // 这里用包实际尺寸反推,不依赖 header.len 字段,容忍对端把 len 写成
+        // 整包长度等同的变体实现。
+        let tag_start = packet.len() - LEGACY_AEAD_NONCE_SIZE - LEGACY_AEAD_TAG_SIZE;
+        let nonce_start = packet.len() - LEGACY_AEAD_NONCE_SIZE;
+        let mut tag = [0_u8; LEGACY_AEAD_TAG_SIZE];
+        tag.copy_from_slice(&packet[tag_start..tag_start + LEGACY_AEAD_TAG_SIZE]);
+        let mut nonce_bytes = [0_u8; LEGACY_AEAD_NONCE_SIZE];
+        nonce_bytes.copy_from_slice(&packet[nonce_start..]);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let cipher = Aes128Gcm::new(GenericArray::from_slice(&self.key_128));
+
+        let mut output = packet[..HEADER_SIZE + ciphertext_len].to_vec();
+        cipher
+            .decrypt_in_place_detached(
+                nonce,
+                &[],
+                &mut output[HEADER_SIZE..],
+                GenericArray::from_slice(&tag),
+            )
+            .map_err(|_| js_error("legacy AES-128-GCM decryption failed"))?;
+        output[9] &= !ENCRYPTED_FLAG;
+        Ok(output)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +551,75 @@ mod tests {
         assert!(build_legacy_handshake_response_impl(0, "office", "s").is_err());
         assert!(build_legacy_handshake_response_impl(1, "", "s").is_err());
         assert!(build_legacy_handshake_response_impl(1, "office", "").is_err());
+    }
+
+    #[test]
+    fn derive_key_128_matches_upstream_reference_vector() {
+        // 与上游 `easytier-core/src/tunnel/encrypt/mod.rs` 的
+        // `network_secret_key_derivation_is_stable` 单测共用同一参考向量,
+        // 防止本模块重写派生算法时悄悄偏离上游 AES-128-GCM 密钥。
+        let expected = [
+            86u8, 90, 25, 219, 78, 240, 193, 33, 168, 172, 88, 14, 218, 248, 78, 166,
+        ];
+        assert_eq!(derive_key_128("secret"), expected);
+    }
+
+    #[test]
+    fn legacy_cipher_round_trips_an_arbitrary_packet() {
+        // 构造一个 RpcReq 控制面帧:16 字节头 + 8 字节负载。
+        let payload = [0xab; 8];
+        let frame = encode_header(123, 10_000_001, 8, &payload);
+        assert_eq!(frame[9], 0);
+
+        let cipher = LegacyCipher::new("et.xiaoyu").unwrap();
+        let encrypted = cipher.encrypt_packet(&frame).unwrap();
+        assert_eq!(encrypted.len(), frame.len() + LEGACY_AEAD_TAIL_SIZE);
+        assert_ne!(&encrypted[HEADER_SIZE..frame.len()], &payload[..]);
+        assert_eq!(encrypted[9] & ENCRYPTED_FLAG, ENCRYPTED_FLAG);
+
+        let decrypted = cipher.decrypt_packet(&encrypted).unwrap();
+        assert_eq!(decrypted, frame);
+        assert_eq!(decrypted[9] & ENCRYPTED_FLAG, 0);
+    }
+
+    #[test]
+    fn legacy_cipher_returns_input_when_not_encrypted() {
+        // 上游 secure-mode 客户端、Ping/Pong 等不带 ENCRYPTED_FLAG 的帧
+        // 经过 decrypt_packet 时原样返回,方便服务端在混合路径上调用。
+        let payload = [0xcd; 4];
+        let frame = encode_header(7, 10_000_001, 4, &payload);
+        let cipher = LegacyCipher::new("et.xiaoyu").unwrap();
+        let decrypted = cipher.decrypt_packet(&frame).unwrap();
+        assert_eq!(decrypted, frame);
+    }
+
+    #[test]
+    fn legacy_cipher_rejects_wrong_secret_or_tampered_ciphertext() {
+        let payload = [0x77; 16];
+        let frame = encode_header(42, 10_000_001, 8, &payload);
+
+        let cipher_a = LegacyCipher::new("secret-a").unwrap();
+        let cipher_b = LegacyCipher::new("secret-b").unwrap();
+        let encrypted = cipher_a.encrypt_packet(&frame).unwrap();
+
+        // 用错误的 network_secret 派生的密钥无法解密。
+        assert!(cipher_b.decrypt_packet(&encrypted).is_err());
+
+        // 翻转密文一字节也应导致 AEAD tag 校验失败。
+        let mut tampered = encrypted.clone();
+        tampered[HEADER_SIZE] ^= 0xff;
+        assert!(cipher_a.decrypt_packet(&tampered).is_err());
+    }
+
+    #[test]
+    fn legacy_cipher_rejects_short_packets() {
+        let cipher = LegacyCipher::new("et.xiaoyu").unwrap();
+        assert!(cipher.encrypt_packet(&[]).is_err());
+        assert!(cipher.decrypt_packet(&[]).is_err());
+        // 仅有头部、无 AEAD 尾且 ENCRYPTED_FLAG 已置位的包也要拒绝。
+        let mut head_only = vec![0u8; HEADER_SIZE];
+        head_only[9] |= ENCRYPTED_FLAG;
+        assert!(cipher.decrypt_packet(&head_only).is_err());
     }
 
     fn hex(bytes: &[u8]) -> String {

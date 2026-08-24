@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	LegacyCipher,
 	build_legacy_handshake_response,
 	parse_legacy_handshake,
 	verify_network_secret_digest,
@@ -325,5 +326,61 @@ describe("build_legacy_handshake_response", () => {
 		expect(() => build_legacy_handshake_response(SERVER_PEER_ID, "office", "")).toThrow(
 			/network_secret/,
 		);
+	});
+});
+
+// 上游 EasyTier 2.6.4 的 `gen_default_flags()` 把 `enable_encryption` 默认置 true,
+// `encryption_algorithm` 默认 "aes-gcm"。即使客户端没有 secure mode,直达 RPC 也
+// 会被 `derive_key_128(network_secret)` 派生的 AES-128-GCM 密钥加密。本组测试
+// 复现这条路径,确认服务端 `LegacyCipher` 能与上游客户端互通。
+describe("LegacyCipher", () => {
+	it("round-trips a legacy direct RPC packet under the network secret", () => {
+		const plaintext = createPacket(
+			0x0a0b0c0d,
+			SERVER_PEER_ID,
+			PacketType.RpcReq,
+			new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
+		);
+		expect(plaintext[9] & ENCRYPTED_FLAG).toBe(0);
+
+		const cipher = new LegacyCipher("et.xiaoyu");
+		const encrypted = cipher.encrypt_packet(plaintext);
+		expect(encrypted.byteLength).toBe(plaintext.byteLength + EASYTIER_AEAD_TAIL_SIZE);
+		expect(encrypted[9] & ENCRYPTED_FLAG).toBe(ENCRYPTED_FLAG);
+
+		const { header, payload } = parsePacket(encrypted);
+		expect(header.fromPeerId).toBe(0x0a0b0c0d);
+		expect(header.toPeerId).toBe(SERVER_PEER_ID);
+		expect(header.packetType).toBe(PacketType.RpcReq);
+		expect(payload.byteLength).toBe(8 + EASYTIER_AEAD_TAIL_SIZE);
+
+		const decrypted = cipher.decrypt_packet(encrypted);
+		expect(decrypted).toEqual(plaintext);
+	});
+
+	it("decrypts with the same network_secret that encrypted, and rejects mismatches", () => {
+		const cipher = new LegacyCipher("office-secret");
+		const attacker = new LegacyCipher("a-different-secret");
+
+		const plaintext = createPacket(7, SERVER_PEER_ID, PacketType.RpcReq, new Uint8Array(16));
+		const encrypted = cipher.encrypt_packet(plaintext);
+
+		expect(cipher.decrypt_packet(encrypted)).toEqual(plaintext);
+		expect(() => attacker.decrypt_packet(encrypted)).toThrow();
+	});
+
+	it("passes plaintext through decrypt_packet when ENCRYPTED_FLAG is not set", () => {
+		// 上游 Ping/Pong/Handshake 帧不经 `RpcTransport::send`,不带 ENCRYPTED_FLAG,
+		// `LegacyCipher.decrypt_packet` 必须原样返回以方便服务端走统一入站路径。
+		const plaintext = createPacket(7, SERVER_PEER_ID, PacketType.Ping, new Uint8Array([1]));
+		const cipher = new LegacyCipher("office-secret");
+		expect(cipher.decrypt_packet(plaintext)).toEqual(plaintext);
+	});
+
+	it("rejects empty network_secret and short packets", () => {
+		expect(() => new LegacyCipher("")).toThrow(/network_secret/);
+		const cipher = new LegacyCipher("office-secret");
+		expect(() => cipher.encrypt_packet(new Uint8Array(0))).toThrow();
+		expect(() => cipher.decrypt_packet(new Uint8Array(0))).toThrow();
 	});
 });
