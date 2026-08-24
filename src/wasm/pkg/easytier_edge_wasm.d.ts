@@ -34,26 +34,21 @@ export class SecurePeer {
 export class WasmRpcCore {
     free(): void;
     [Symbol.dispose](): void;
-    add_peer(network: string, peer_id: number, remote_public_key: Uint8Array): void;
-    build_route_update(network: string, peer_id: number, server_session_id: bigint, force_full: boolean, now_ms: bigint): Uint8Array;
-    clean_expired(now_ms: bigint): void;
-    handle_request(network: string, authenticated_peer_id: number, payload: Uint8Array, now_ms: bigint): Uint8Array;
-    handle_response(network: string, authenticated_peer_id: number, payload: Uint8Array, now_ms: bigint): boolean;
+    add_peer(network: string, peer_id: number, remote_public_key: Uint8Array, now_ms: bigint): void;
+    build_route_update(network: string, peer_id: number, server_session_id: bigint, now_ms: bigint): Uint8Array;
+    clean_expired(now_ms: bigint): string[];
     /**
      * 查询到达目标节点的下一跳网关(链式接入)。
      * 返回 0 表示目标不可达;直连节点返回其自身。
      */
     get_next_hop(network: string, peer_id: number): number;
     /**
-     * 恢复持久化的 peer_route_id(16 位十六进制字符串,宿主在 DO 启动时
-     * 从 storage 注入,须早于 add_peer 调用)。
-     */
-    set_peer_route_id(network: string, route_id: string): void;
-    /**
      * 读取(必要时生成)本中继在该网络的 peer_route_id,宿主负责把首次
      * 生成的值持久化到 DO storage,DO 重启后回注保持稳定。
      */
     get_peer_route_id(network: string): string;
+    handle_request(network: string, authenticated_peer_id: number, payload: Uint8Array, now_ms: bigint): Uint8Array;
+    handle_response(network: string, authenticated_peer_id: number, payload: Uint8Array, now_ms: bigint): boolean;
     constructor(public_key: Uint8Array, hostname: string, server_peer_id: number);
     remove_peer(network: string, peer_id: number): void;
     /**
@@ -62,6 +57,16 @@ export class WasmRpcCore {
      * 数据面转发在服务端被丢弃,同时告知节点不要把数据路由经过本中继。
      */
     set_avoid_relay_data(enabled: boolean): void;
+    /**
+     * 恢复持久化的 peer_route_id(16 位十六进制字符串,宿主在 DO 启动时
+     * 从 storage 注入,须早于 add_peer 调用)。
+     */
+    set_peer_route_id(network: string, route_id: string): void;
+    /**
+     * RELAY_PEER_ROUTES 开关:是否接受网关代发的第三方节点路由。
+     * 必须在 add_peer 之前调用;信令服务器拓扑下保持默认关闭。
+     */
+    set_relay_peer_routes(enabled: boolean): void;
 }
 
 /**
@@ -128,14 +133,18 @@ export interface InitOutput {
     readonly securepeer_new: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly securepeer_read_msg1: (a: number, b: number, c: number, d: number) => void;
     readonly verify_network_secret_digest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
-    readonly wasmrpccore_add_peer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
-    readonly wasmrpccore_build_route_update: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: number, h: bigint) => void;
-    readonly wasmrpccore_clean_expired: (a: number, b: bigint) => void;
+    readonly wasmrpccore_add_peer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => void;
+    readonly wasmrpccore_build_route_update: (a: number, b: number, c: number, d: number, e: number, f: bigint, g: bigint) => void;
+    readonly wasmrpccore_clean_expired: (a: number, b: number, c: bigint) => void;
+    readonly wasmrpccore_get_next_hop: (a: number, b: number, c: number, d: number) => number;
+    readonly wasmrpccore_get_peer_route_id: (a: number, b: number, c: number, d: number) => void;
     readonly wasmrpccore_handle_request: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => void;
     readonly wasmrpccore_handle_response: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: bigint) => void;
     readonly wasmrpccore_new: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly wasmrpccore_remove_peer: (a: number, b: number, c: number, d: number) => void;
     readonly wasmrpccore_set_avoid_relay_data: (a: number, b: number, c: number) => void;
+    readonly wasmrpccore_set_peer_route_id: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly wasmrpccore_set_relay_peer_routes: (a: number, b: number) => void;
     readonly __wbindgen_export: (a: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
     readonly __wbindgen_export2: (a: number, b: number) => number;
