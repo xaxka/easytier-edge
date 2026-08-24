@@ -284,34 +284,24 @@ pub struct LegacyCipher {
     key_128: [u8; 16],
 }
 
-#[wasm_bindgen]
 impl LegacyCipher {
-    /// 用 `network_secret` 派生 AES-128-GCM 密钥。
-    #[wasm_bindgen(constructor)]
-    pub fn new(network_secret: &str) -> Result<LegacyCipher, JsValue> {
-        if network_secret.is_empty() {
-            return Err(js_error("network_secret must not be empty"));
-        }
-        Ok(Self {
-            key_128: derive_key_128(network_secret),
-        })
-    }
-
-    /// 加密一帧未带 AEAD 尾的 EasyTier 包(16 字节头 + 明文 payload)。
-    /// 返回 16 字节头(置 ENCRYPTED_FLAG) + 密文 + 16 字节 tag + 12 字节 nonce,
-    /// 与上游 `AesGcmCipher::encrypt_with_nonce(None)` 一致。
-    pub fn encrypt_packet(&self, packet: &[u8]) -> Result<Vec<u8>, JsValue> {
+    /// 内部实现,返回 `Result<_, String>` 以便在 `cargo test`(非 wasm32 host)
+    /// 下也能跑错误路径的断言。`#[wasm_bindgen]` 包装函数把 `String` 错误
+    /// 转成 `JsValue`,避免在非 wasm 目标上构造 `JsValue` 时触发
+    /// `function not implemented on non-wasm32 targets` 的 panic。
+    pub(crate) fn encrypt_packet_impl(&self, packet: &[u8]) -> Result<Vec<u8>, String> {
         if packet.len() < HEADER_SIZE {
-            return Err(js_error("legacy packet is shorter than the EasyTier header"));
+            return Err("legacy packet is shorter than the EasyTier header".to_string());
         }
         let mut output = packet.to_vec();
         let mut nonce_bytes = [0_u8; LEGACY_AEAD_NONCE_SIZE];
-        getrandom::fill(&mut nonce_bytes).map_err(display_error)?;
+        getrandom::fill(&mut nonce_bytes)
+            .map_err(|err| format!("legacy nonce generation failed: {err}"))?;
         let nonce = Nonce::from_slice(&nonce_bytes);
         let cipher = Aes128Gcm::new(GenericArray::from_slice(&self.key_128));
         let tag = cipher
             .encrypt_in_place_detached(nonce, &[], &mut output[HEADER_SIZE..])
-            .map_err(|_| js_error("legacy AES-128-GCM encryption failed"))?;
+            .map_err(|_| "legacy AES-128-GCM encryption failed".to_string())?;
         output.extend_from_slice(tag.as_slice());
         output.extend_from_slice(&nonce_bytes);
         // 头 flags 字节置 ENCRYPTED_FLAG,其它位保留(便于上游 set_compressed 等
@@ -323,19 +313,16 @@ impl LegacyCipher {
         Ok(output)
     }
 
-    /// 解密一帧带 AEAD 尾的 EasyTier 包(16 字节头 + 密文 + 16 字节 tag +
-    /// 12 字节 nonce)。返回 16 字节头(清 ENCRYPTED_FLAG) + 明文 payload。
-    /// 若包未置 ENCRYPTED_FLAG 则原样返回,便于调用方在两种 flag 路径间统一。
-    pub fn decrypt_packet(&self, packet: &[u8]) -> Result<Vec<u8>, JsValue> {
+    pub(crate) fn decrypt_packet_impl(&self, packet: &[u8]) -> Result<Vec<u8>, String> {
         if packet.len() < HEADER_SIZE {
-            return Err(js_error("legacy encrypted packet is shorter than the EasyTier header"));
+            return Err("legacy encrypted packet is shorter than the EasyTier header".to_string());
         }
-        let header = PacketHeader::from_bytes(packet).map_err(js_error)?;
+        let header = PacketHeader::from_bytes(packet)?;
         if header.flags & ENCRYPTED_FLAG == 0 {
             return Ok(packet.to_vec());
         }
         if packet.len() < HEADER_SIZE + LEGACY_AEAD_TAIL_SIZE {
-            return Err(js_error("legacy encrypted packet is missing the AEAD tail"));
+            return Err("legacy encrypted packet is missing the AEAD tail".to_string());
         }
         let ciphertext_len = packet.len() - HEADER_SIZE - LEGACY_AEAD_TAIL_SIZE;
         // 上游 `PeerManagerHeader::len` 字段记录的是密文长度(不含 tag+nonce)。
@@ -358,9 +345,37 @@ impl LegacyCipher {
                 &mut output[HEADER_SIZE..],
                 GenericArray::from_slice(&tag),
             )
-            .map_err(|_| js_error("legacy AES-128-GCM decryption failed"))?;
+            .map_err(|_| "legacy AES-128-GCM decryption failed".to_string())?;
         output[9] &= !ENCRYPTED_FLAG;
         Ok(output)
+    }
+}
+
+#[wasm_bindgen]
+impl LegacyCipher {
+    /// 用 `network_secret` 派生 AES-128-GCM 密钥。
+    #[wasm_bindgen(constructor)]
+    pub fn new(network_secret: &str) -> Result<LegacyCipher, JsValue> {
+        if network_secret.is_empty() {
+            return Err(js_error("network_secret must not be empty"));
+        }
+        Ok(Self {
+            key_128: derive_key_128(network_secret),
+        })
+    }
+
+    /// 加密一帧未带 AEAD 尾的 EasyTier 包(16 字节头 + 明文 payload)。
+    /// 返回 16 字节头(置 ENCRYPTED_FLAG) + 密文 + 16 字节 tag + 12 字节 nonce,
+    /// 与上游 `AesGcmCipher::encrypt_with_nonce(None)` 一致。
+    pub fn encrypt_packet(&self, packet: &[u8]) -> Result<Vec<u8>, JsValue> {
+        self.encrypt_packet_impl(packet).map_err(js_error)
+    }
+
+    /// 解密一帧带 AEAD 尾的 EasyTier 包(16 字节头 + 密文 + 16 字节 tag +
+    /// 12 字节 nonce)。返回 16 字节头(清 ENCRYPTED_FLAG) + 明文 payload。
+    /// 若包未置 ENCRYPTED_FLAG 则原样返回,便于调用方在两种 flag 路径间统一。
+    pub fn decrypt_packet(&self, packet: &[u8]) -> Result<Vec<u8>, JsValue> {
+        self.decrypt_packet_impl(packet).map_err(js_error)
     }
 }
 
@@ -571,13 +586,15 @@ mod tests {
         let frame = encode_header(123, 10_000_001, 8, &payload);
         assert_eq!(frame[9], 0);
 
+        // `LegacyCipher::new(non_empty_secret)` 的 Ok 路径不构造 JsValue,
+        // 可以在非 wasm32 host 上调用。错误路径(空 secret)只通过 TS 单测覆盖。
         let cipher = LegacyCipher::new("et.xiaoyu").unwrap();
-        let encrypted = cipher.encrypt_packet(&frame).unwrap();
+        let encrypted = cipher.encrypt_packet_impl(&frame).unwrap();
         assert_eq!(encrypted.len(), frame.len() + LEGACY_AEAD_TAIL_SIZE);
         assert_ne!(&encrypted[HEADER_SIZE..frame.len()], &payload[..]);
         assert_eq!(encrypted[9] & ENCRYPTED_FLAG, ENCRYPTED_FLAG);
 
-        let decrypted = cipher.decrypt_packet(&encrypted).unwrap();
+        let decrypted = cipher.decrypt_packet_impl(&encrypted).unwrap();
         assert_eq!(decrypted, frame);
         assert_eq!(decrypted[9] & ENCRYPTED_FLAG, 0);
     }
@@ -589,7 +606,7 @@ mod tests {
         let payload = [0xcd; 4];
         let frame = encode_header(7, 10_000_001, 4, &payload);
         let cipher = LegacyCipher::new("et.xiaoyu").unwrap();
-        let decrypted = cipher.decrypt_packet(&frame).unwrap();
+        let decrypted = cipher.decrypt_packet_impl(&frame).unwrap();
         assert_eq!(decrypted, frame);
     }
 
@@ -600,26 +617,26 @@ mod tests {
 
         let cipher_a = LegacyCipher::new("secret-a").unwrap();
         let cipher_b = LegacyCipher::new("secret-b").unwrap();
-        let encrypted = cipher_a.encrypt_packet(&frame).unwrap();
+        let encrypted = cipher_a.encrypt_packet_impl(&frame).unwrap();
 
         // 用错误的 network_secret 派生的密钥无法解密。
-        assert!(cipher_b.decrypt_packet(&encrypted).is_err());
+        assert!(cipher_b.decrypt_packet_impl(&encrypted).is_err());
 
         // 翻转密文一字节也应导致 AEAD tag 校验失败。
         let mut tampered = encrypted.clone();
         tampered[HEADER_SIZE] ^= 0xff;
-        assert!(cipher_a.decrypt_packet(&tampered).is_err());
+        assert!(cipher_a.decrypt_packet_impl(&tampered).is_err());
     }
 
     #[test]
     fn legacy_cipher_rejects_short_packets() {
         let cipher = LegacyCipher::new("et.xiaoyu").unwrap();
-        assert!(cipher.encrypt_packet(&[]).is_err());
-        assert!(cipher.decrypt_packet(&[]).is_err());
+        assert!(cipher.encrypt_packet_impl(&[]).is_err());
+        assert!(cipher.decrypt_packet_impl(&[]).is_err());
         // 仅有头部、无 AEAD 尾且 ENCRYPTED_FLAG 已置位的包也要拒绝。
         let mut head_only = vec![0u8; HEADER_SIZE];
         head_only[9] |= ENCRYPTED_FLAG;
-        assert!(cipher.decrypt_packet(&head_only).is_err());
+        assert!(cipher.decrypt_packet_impl(&head_only).is_err());
     }
 
     fn hex(bytes: &[u8]) -> String {
