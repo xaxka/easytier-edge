@@ -543,11 +543,11 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 	}
 
 	private failConnection(connection: Connection, error: unknown): void {
-		console.warn("EasyTier connection rejected", {
-			networkName: connection.networkName || undefined,
-			peerId: connection.peerId || undefined,
-			error: errorMessage(error),
-		});
+		const reason = errorMessage(error);
+		console.warn(
+			`EasyTier connection rejected network=${connection.networkName || "?"} peer=${connection.peerId || "?"} error=${reason}`,
+			{ networkName: connection.networkName || undefined, peerId: connection.peerId || undefined, error: reason },
+		);
 		this.close(connection, 4401, "EasyTier authentication or protocol error");
 	}
 
