@@ -55,6 +55,12 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 	private localPublicKey = "";
 	private identityReady: Promise<void> | null = null;
 	private readonly persistedRouteIds = new Set<string>();
+	/**
+	 * 重启后待"立即重泛洪"的网络:由 restoreRouteIds 从 DO storage 中存在
+	 * route_id 记录的网络(即重启前已存在的网络)填充。首个节点回归时
+	 * 清空并触发一次 force-full 路由同步,把客户端缓存的陈旧拓扑冲掉。
+	 */
+	private readonly resyncPendingNetworks = new Set<string>();
 	private readonly connections = new Map<WebSocket, Connection>();
 	private readonly rooms = new RoomRegistry();
 	private pendingHandshakes = 0;
@@ -137,6 +143,9 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			try {
 				this.rpc.setPeerRouteId(networkName, routeId);
 				this.persistedRouteIds.add(networkName);
+				// 重启前已存在的网络:peer_info 已随内存丢失,首个节点回归
+				// 时需触发一次 force-full 重泛洪,把客户端缓存的陈旧拓扑冲掉。
+				this.resyncPendingNetworks.add(networkName);
 			} catch {
 				// 无效记录忽略:首次注册时会重新生成并覆盖。
 			}
@@ -316,7 +325,7 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		this.registerConnection(connection);
 		completeHandshake(connection);
 		this.releaseHandshakeSlot(connection);
-		this.broadcastRouteUpdate(connection.networkName);
+		this.announcePeer(connection.networkName);
 	}
 
 	private handleHandshakeMessage3(
@@ -338,7 +347,7 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		this.registerConnection(connection);
 		completeHandshake(connection);
 		this.releaseHandshakeSlot(connection);
-		this.broadcastRouteUpdate(connection.networkName);
+		this.announcePeer(connection.networkName);
 	}
 
 	/** 握手完成或未认证断开时,归还未认证连接配额。 */
@@ -471,11 +480,27 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		disposeConnection(connection);
 	}
 
-	private broadcastRouteUpdate(networkName: string, excludePeerId?: number): void {
+	/**
+	 * 握手完成后向同网络节点广播路由更新。服务端(DO 实例)重启后
+	 * 内存中的 peer_info 路由表已清空,而持久化的 peer_route_id 让
+	 * 客户端缓存的服务端条目仍视作有效——上游 EasyTier 靠进程级
+	 * route_id 重新随机来隐式通知"服务端已重启、请重新泛洪",本服务
+	 * 为避免重连死循环固定了 route_id,故在此显式补一次全量同步,
+	 * 把客户端缓存的陈旧拓扑冲掉、触发 OSPF 链路状态重新收敛。每个
+	 * 网络仅触发一次:首个回归节点把陈旧视图刷成当前快照,后续节点按
+	 * 增量加入即可。普通节点断开走 broadcastRouteUpdate 增量路径,
+	 * 不经过此处的重泛洪判定。
+	 */
+	private announcePeer(networkName: string): void {
+		const forceFull = this.resyncPendingNetworks.delete(networkName);
+		this.broadcastRouteUpdate(networkName, undefined, forceFull);
+	}
+
+	private broadcastRouteUpdate(networkName: string, excludePeerId?: number, forceFull = false): void {
 		for (const peer of this.rooms.peers(networkName)) {
 			if (peer.peerId === excludePeerId || peer.phase !== "ready") continue;
 			try {
-				this.rpc.sendRouteUpdate(peer, false);
+				this.rpc.sendRouteUpdate(peer, forceFull);
 			} catch (error) {
 				console.error("route synchronization failed", {
 					networkName: peer.networkName,
