@@ -50,11 +50,11 @@ pub(crate) struct RouteUpdate {
     pub(crate) topology_version: Option<u64>,
 }
 
-/// 过期清理结果:route_changed 表示路由表发生变化(应触发重发),
+/// 过期清理结果:route_changed_networks 列出路由表发生变化的网络(应触发重发),
 /// dead_direct_peers 是会话静默超时的半开直连节点("网络\u{1f}peer_id"),
 /// 宿主应关闭其 WebSocket 连接。
 pub(crate) struct SweepOutcome {
-    pub(crate) route_changed: bool,
+    pub(crate) route_changed_networks: Vec<String>,
     pub(crate) dead_direct_peers: Vec<String>,
 }
 
@@ -344,9 +344,10 @@ impl RouteState {
     pub(crate) fn sweep_expired_route_info(&mut self, now_ms: u64) -> SweepOutcome {
         let relay_peer_routes = self.relay_peer_routes;
         let group_keys: Vec<String> = self.groups.keys().cloned().collect();
-        let mut route_changed = false;
+        let mut route_changed_networks: Vec<String> = Vec::new();
         let mut dead_direct_peers: Vec<String> = Vec::new();
         for group_key in group_keys {
+            let mut group_changed = false;
             // Pass 1: 半开直连检测。会话 90s 无任何收包即视为半开连接,
             // 执行完整 remove_peer(含孤儿第三方清理与拓扑版本推进)。
             let dead_direct: Vec<PeerId> = {
@@ -366,7 +367,7 @@ impl RouteState {
                 self.remove_peer(&group_key, pid);
                 // "网络\u{1f}peer_id":宿主据此关闭对应 WebSocket。
                 dead_direct_peers.push(format!("{}\u{1f}{}", group_key, pid));
-                route_changed = true;
+                group_changed = true;
             }
             let g = self.groups.get_mut(&group_key).expect("group exists");
             // 网关 liveness 以会话最近同步时间为准:在线网关每 ~60s
@@ -415,29 +416,31 @@ impl RouteState {
                     (!reachable).then_some(*pid)
                 })
                 .collect();
-            if purge.is_empty() {
-                continue;
-            }
-            for pid in &purge {
-                g.peer_infos.remove(pid);
-                g.raw_peer_infos.remove(pid);
-                g.authenticated_peer_keys.remove(pid);
-                g.conn_rows.remove(pid);
-                for session in g.sessions.values_mut() {
-                    session.peer_info_ver_map.remove(pid);
-                    session.last_topology_version = 0;
+            if !purge.is_empty() {
+                for pid in &purge {
+                    g.peer_infos.remove(pid);
+                    g.raw_peer_infos.remove(pid);
+                    g.authenticated_peer_keys.remove(pid);
+                    g.conn_rows.remove(pid);
+                    for session in g.sessions.values_mut() {
+                        session.peer_info_ver_map.remove(pid);
+                        session.last_topology_version = 0;
+                    }
                 }
+                // 同步剔除失效网关的链路与已回收节点的引用,避免残留拓扑。
+                g.gateway_links.retain(|gateway, links| {
+                    links.retain(|pid| g.peer_infos.contains_key(pid) || g.peers.contains(pid));
+                    g.peers.contains(gateway) && alive_gateways.contains(gateway) && !links.is_empty()
+                });
+                Self::note_topology_change(g);
+                group_changed = true;
             }
-            // 同步剔除失效网关的链路与已回收节点的引用,避免残留拓扑。
-            g.gateway_links.retain(|gateway, links| {
-                links.retain(|pid| g.peer_infos.contains_key(pid) || g.peers.contains(pid));
-                g.peers.contains(gateway) && alive_gateways.contains(gateway) && !links.is_empty()
-            });
-            Self::note_topology_change(g);
-            route_changed = true;
+            if group_changed {
+                route_changed_networks.push(group_key.clone());
+            }
         }
         SweepOutcome {
-            route_changed,
+            route_changed_networks,
             dead_direct_peers,
         }
     }
@@ -1855,7 +1858,7 @@ mod tests {
         let now = REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS + 2_000;
         let outcome = s.sweep_expired_route_info(now);
         // 网关 B 自身作为半开直连被完整移除并上报给宿主关闭连接。
-        assert!(outcome.route_changed);
+        assert!(outcome.route_changed_networks.contains(&"net".to_string()));
         assert_eq!(outcome.dead_direct_peers, vec!["net\u{1f}2".to_string()]);
         let g = s.groups.get("net").unwrap();
         assert!(!g.peer_infos.contains_key(&CHAINED_C));
@@ -1882,7 +1885,7 @@ mod tests {
         s.handle_sync_route_info_request("net", GATEWAY_B, &refresh, t)
             .unwrap();
         let outcome = s.sweep_expired_route_info(t);
-        assert!(!outcome.route_changed);
+        assert!(!outcome.route_changed_networks.contains(&"net".to_string()));
         assert!(outcome.dead_direct_peers.is_empty());
         assert!(s.groups["net"].peer_infos.contains_key(&CHAINED_C));
     }
@@ -1907,7 +1910,7 @@ mod tests {
         s.handle_sync_route_info_request("net", GATEWAY_B, &refresh, t)
             .unwrap();
         let outcome = s.sweep_expired_route_info(t);
-        assert!(outcome.route_changed);
+        assert!(outcome.route_changed_networks.contains(&"net".to_string()));
         assert!(outcome.dead_direct_peers.is_empty());
         assert!(!s.groups["net"].peer_infos.contains_key(&CHAINED_C));
     }
@@ -2021,7 +2024,7 @@ mod tests {
         let t = REMOVE_UNREACHABLE_PEER_INFO_AFTER_MS + 2_000;
         let outcome = s.sweep_expired_route_info(t);
         // 直连节点整体移除并上报:g.peers 也不复存在(不再广播假边)。
-        assert!(outcome.route_changed);
+        assert!(outcome.route_changed_networks.contains(&"net".to_string()));
         assert_eq!(outcome.dead_direct_peers.len(), 1);
         assert!(!s.groups["net"].peer_infos.contains_key(&PEER_A));
         assert!(!s.groups["net"].peers.contains(&PEER_A));

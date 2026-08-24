@@ -54,6 +54,12 @@ enum MergedPacket {
     Complete(RpcPacket),
 }
 
+#[derive(serde::Serialize)]
+struct CleanExpiredOutcome {
+    route_changed_networks: Vec<String>,
+    dead_direct_peers: Vec<String>,
+}
+
 #[wasm_bindgen]
 pub struct WasmRpcCore {
     routes: RouteState,
@@ -462,7 +468,7 @@ impl WasmRpcCore {
         Ok(packet.encode_to_vec())
     }
 
-    pub fn clean_expired(&mut self, now_ms: u64) -> Vec<String> {
+    pub fn clean_expired(&mut self, now_ms: u64) -> Result<String, JsValue> {
         self.clean_rpc_state(now_ms);
         // 由宿主每 10s 的维护定时器调用:基于 last_update 回收
         // 失去在线网关支撑/长期未续期的路由条目,防止异常掉线
@@ -471,7 +477,11 @@ impl WasmRpcCore {
         // 宿主应关闭其 WebSocket 连接。
         let outcome = self.routes.sweep_expired_route_info(now_ms);
         self.peer_center.clean_outdated(PEER_CENTER_TTL_SECONDS);
-        outcome.dead_direct_peers
+        serde_json::to_string(&CleanExpiredOutcome {
+            route_changed_networks: outcome.route_changed_networks,
+            dead_direct_peers: outcome.dead_direct_peers,
+        })
+        .map_err(|e| error(&e.to_string()))
     }
 }
 

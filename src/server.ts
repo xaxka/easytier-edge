@@ -558,7 +558,8 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 		this.maintenanceTimer = setTimeout(() => {
 			this.maintenanceTimer = null;
 			const now = Date.now();
-			for (const failure of this.rpc.cleanExpired(now)) {
+			const { routeChangedNetworks, failures } = this.rpc.cleanExpired(now);
+			for (const failure of failures) {
 				// 两类来源:同步重试超时,以及会话静默 90s 的半开连接
 				// (close 事件丢失)。后者的路由状态已在 wasm 层完整清理,
 				// 这里只负责关闭对应的 WebSocket 促使对端重连。
@@ -569,6 +570,12 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 				});
 				const connection = this.findPeer(failure.peer.networkName, failure.peer.peerId);
 				if (connection) this.close(connection, 1011, "route synchronization retry failed");
+			}
+			// 清理过期的第三方(链式接入)路由后,向受影响的网络广播更新,
+			// 让其他节点学到已失效的条目。半开直连节点的关闭已触发其
+			// 所在网络的广播,这里只覆盖仅有第三方路由被清理的网络。
+			for (const networkName of routeChangedNetworks) {
+				this.broadcastRouteUpdate(networkName);
 			}
 			for (const connection of this.connections.values()) {
 				if (connection.phase !== "ready") continue;

@@ -16,7 +16,5 @@ NETWORK_SECRET=use-a-long-random-secret
 # - secure(默认):仅接受 Noise XX 安全握手(客户端需 --secure-mode)。
 # - legacy:仅接受旧版明文 HandShake 握手,凭网络密码摘要认证,
 #   面向无法配置 secure mode 的客户端(GUI/旧版/嵌入式)。传输层不加密。
-# - auto(不推荐):按客户端首包类型自动接受两种握手。
-#   注意:auto 下同一房间内 secure 与 legacy 节点之间无法建立 p2p,
-#   仅同类节点之间可 p2p。建议显式选择 secure 或 legacy。
+# 两种模式不能在同一网络内混用。
 # CONNECTION_MODE=secure

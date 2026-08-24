@@ -2,7 +2,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![CI](https://github.com/xixka/easytier-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/xixka/easytier-edge/actions/workflows/ci.yml)
+[![CI](https://github.com/xaxka/easytier-edge/actions/workflows/ci.yml/badge.svg)](https://github.com/xaxka/easytier-edge/actions/workflows/ci.yml)
 
 **运行在 Cloudflare 边缘网络上的安全 EasyTier WebSocket 中继。**
 
@@ -43,7 +43,7 @@ Durable Object
 
 ## 部署
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/xixka/easytier-edge)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/xaxka/easytier-edge)
 
 部署需要配置两个 Secret:
 

@@ -80,10 +80,14 @@ export class EasyTierRpc {
 		return this.core.get_peer_route_id(networkName);
 	}
 
-	cleanExpired(now: number): RouteSyncFailure[] {
-		const deadDirect = this.core.clean_expired(BigInt(now)) as string[];
+	cleanExpired(now: number): { routeChangedNetworks: string[]; failures: RouteSyncFailure[] } {
+		const json = this.core.clean_expired(BigInt(now));
+		const parsed = JSON.parse(json) as {
+			route_changed_networks: string[];
+			dead_direct_peers: string[];
+		};
 		const failures: RouteSyncFailure[] = [];
-		for (const entry of deadDirect) {
+		for (const entry of parsed.dead_direct_peers) {
 			// "网络\u001fpeer_id":会话 90s 静默的半开直连节点,
 			// wasm 层已做完整 remove_peer,这里上报宿主关闭连接。
 			const sep = entry.lastIndexOf("\u001f");
@@ -110,7 +114,7 @@ export class EasyTierRpc {
 				});
 			}
 		}
-		return failures;
+		return { routeChangedNetworks: parsed.route_changed_networks, failures };
 	}
 
 	handleRequest(
@@ -189,8 +193,8 @@ export class EasyTierRpc {
 	private flushRouteUpdate(state: RouteSyncState, now: number): void {
 		if (state.inFlight || (!state.dirty && !state.forceFull)) return;
 		const forceFull = state.forceFull;
-		state.dirty = false;
-		state.forceFull = false;
+		// 先构建路由更新包;若失败则保留 dirty/forceFull 标志,
+		// 下次维护周期(10s)或 cleanExpired 重试时会重新发起。
 		const packet = this.core.build_route_update(
 			state.peer.networkName,
 			state.peer.peerId,
@@ -198,6 +202,8 @@ export class EasyTierRpc {
 			forceFull,
 			BigInt(now),
 		);
+		state.dirty = false;
+		state.forceFull = false;
 		state.inFlight = true;
 		state.sentAt = now;
 		try {
