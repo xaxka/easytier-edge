@@ -577,6 +577,7 @@ impl RouteState {
         target_peer_id: PeerId,
         server_session_id: SessionId,
         we_are_initiator: bool,
+        force_full: bool,
         now_ms: u64,
     ) -> Result<RouteUpdate, String> {
         let my_peer_id = self.my_peer_id;
@@ -592,14 +593,10 @@ impl RouteState {
             session.my_session_id = Some(server_session_id);
         }
 
-        // 首次同步基线:尚未学到对端 session_id 时全量推送自身 peer_info;
-        // 客户端重启后的新 peer_info 由对端以 inst_id 变化触发,不走
-        // 此处的 force 路径。
-        let force_full_local = g
-            .sessions
-            .get(&target_peer_id)
-            .map(|s| s.dst_session_id.is_none())
-            .unwrap_or(true);
+        let force_full_local = {
+            let session = g.sessions.get(&target_peer_id);
+            force_full || session.map(|s| s.dst_session_id.is_none()).unwrap_or(true)
+        };
 
         let mut all_peers: BTreeSet<PeerId> = g.peers.clone();
         // 链式接入:包含经网关转发的第三方节点,让全网都能学到其路由。
@@ -1572,7 +1569,7 @@ mod tests {
         // 新设备 D 加入。
         s.add_peer("net", GATEWAY_D, &[], 1_000).unwrap();
         let update = s
-            .build_sync_route_info_request("net", PEER_A, 9, true, 2_000)
+            .build_sync_route_info_request("net", PEER_A, 9, true, false, 2_000)
             .unwrap();
         let decoded = SyncRouteInfoRequest::decode(update.payload.as_slice()).unwrap();
         let ConnInfo::ConnPeerList(list) = decoded.conn_info.unwrap() else {
@@ -1685,7 +1682,7 @@ mod tests {
             .unwrap();
         s.add_peer("net", PEER_A, &[], 1_000).unwrap();
         let update = s
-            .build_sync_route_info_request("net", PEER_A, 9, true, 2_000)
+            .build_sync_route_info_request("net", PEER_A, 9, true, false, 2_000)
             .unwrap();
         // prost 能整体解码,且字段顺序无关。
         let decoded = SyncRouteInfoRequest::decode(update.payload.as_slice()).unwrap();
@@ -1721,7 +1718,7 @@ mod tests {
         s.handle_sync_route_info_request("net", PEER_A, &req_a, 1_100)
             .unwrap();
         let update = s
-            .build_sync_route_info_request("net", PEER_A, 11, true, 2_000)
+            .build_sync_route_info_request("net", PEER_A, 11, true, false, 2_000)
             .unwrap();
         let decoded = SyncRouteInfoRequest::decode(update.payload.as_slice()).unwrap();
         let ConnInfo::ConnPeerList(list) = decoded.conn_info.unwrap() else {
@@ -1758,7 +1755,7 @@ mod tests {
             .unwrap();
         // A 从未上报信息,走 legacy bitmap 路径。
         let update = s
-            .build_sync_route_info_request("net", PEER_A, 11, true, 2_000)
+            .build_sync_route_info_request("net", PEER_A, 11, true, false, 2_000)
             .unwrap();
         let decoded = SyncRouteInfoRequest::decode(update.payload.as_slice()).unwrap();
         let ConnInfo::ConnBitmap(bitmap) = decoded.conn_info.unwrap() else {

@@ -403,6 +403,7 @@ impl WasmRpcCore {
         network: &str,
         peer_id: u32,
         server_session_id: u64,
+        force_full: bool,
         now_ms: u64,
     ) -> Result<Vec<u8>, JsValue> {
         self.clean_rpc_state(now_ms);
@@ -422,6 +423,7 @@ impl WasmRpcCore {
                 peer_id,
                 server_session_id,
                 we_are_initiator,
+                force_full,
                 now_ms,
             )
             .map_err(|e| error(&e))?;

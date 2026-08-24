@@ -15,6 +15,7 @@ interface RouteSyncState {
 	peer: RpcPeer;
 	inFlight: boolean;
 	dirty: boolean;
+	forceFull: boolean;
 	sentAt: number;
 	lastCompletedAt: number;
 }
@@ -99,6 +100,7 @@ export class EasyTierRpc {
 			if (!state.inFlight || now - state.sentAt <= ROUTE_SYNC_TIMEOUT_MS) continue;
 			state.inFlight = false;
 			state.dirty = true;
+			state.forceFull = true;
 			try {
 				this.flushRouteUpdate(state, now);
 			} catch (error) {
@@ -125,11 +127,11 @@ export class EasyTierRpc {
 		if (result.length === 1) throw new Error("WASM RPC core returned an empty response");
 		this.sendControl(peer, PacketType.RpcResp, result.subarray(1));
 		if (result[0] === 2) {
-			this.sendRouteUpdate(peer);
+			this.sendRouteUpdate(peer, false);
 			return "route";
 		}
 		if (result[0] === 3) {
-			this.sendRouteUpdate(peer);
+			this.sendRouteUpdate(peer, false);
 			return "route-session";
 		}
 		if (result[0] !== 1) throw new Error(`WASM RPC core returned unknown result ${result[0]}`);
@@ -149,7 +151,7 @@ export class EasyTierRpc {
 		state.inFlight = false;
 		state.sentAt = 0;
 		state.lastCompletedAt = Date.now();
-		if (state.dirty) this.flushRouteUpdate(state, Date.now());
+		if (state.dirty || state.forceFull) this.flushRouteUpdate(state, Date.now());
 	}
 
 	maintainPeer(peer: RpcPeer, now: number): void {
@@ -161,10 +163,10 @@ export class EasyTierRpc {
 		) {
 			return;
 		}
-		this.sendRouteUpdate(peer);
+		this.sendRouteUpdate(peer, false);
 	}
 
-	sendRouteUpdate(peer: RpcPeer): void {
+	sendRouteUpdate(peer: RpcPeer, forceFull: boolean): void {
 		const key = routeSyncKey(peer);
 		let state = this.routeSyncStates.get(key);
 		if (!state) {
@@ -172,6 +174,7 @@ export class EasyTierRpc {
 				peer,
 				inFlight: false,
 				dirty: false,
+				forceFull: false,
 				sentAt: 0,
 				lastCompletedAt: 0,
 			};
@@ -179,16 +182,20 @@ export class EasyTierRpc {
 		}
 		state.peer = peer;
 		state.dirty = true;
+		state.forceFull ||= forceFull;
 		this.flushRouteUpdate(state, Date.now());
 	}
 
 	private flushRouteUpdate(state: RouteSyncState, now: number): void {
-		if (state.inFlight || !state.dirty) return;
+		if (state.inFlight || (!state.dirty && !state.forceFull)) return;
+		const forceFull = state.forceFull;
 		state.dirty = false;
+		state.forceFull = false;
 		const packet = this.core.build_route_update(
 			state.peer.networkName,
 			state.peer.peerId,
 			state.peer.serverSessionId,
+			forceFull,
 			BigInt(now),
 		);
 		state.inFlight = true;
@@ -198,6 +205,7 @@ export class EasyTierRpc {
 		} catch (error) {
 			state.inFlight = false;
 			state.dirty = true;
+			state.forceFull ||= forceFull;
 			throw error;
 		}
 	}
