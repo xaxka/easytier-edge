@@ -1011,10 +1011,30 @@ impl RouteState {
             if !g.peers.contains(&pid) && !g.peer_infos.contains_key(&pid) {
                 return;
             }
+            // 过滤上报行里不被本中继认识的邻居 id。服务端重启后状态清零,
+            // 老节点会把重启前的缓存拓扑原样回传:其中对早已离线节点
+            // (例如与其他节点已断开的半开 p2p 链路)的引用没有任何
+            // peer_info 与 conn 行来源。若原样入库并转播,所有客户端都会
+            // 为这些幽灵 id 创建空 peer_info 占位条目,污染路由表;幽灵
+            // 的真实行版本也永远不会续期,只能靠 3660s 的死条目回收清理。
+            // 只保留拓扑内已知成员(直连节点、链式第三方、本中继自身)。
+            let known_neighbors: BTreeSet<PeerId> = {
+                let peers = &g.peers;
+                let peer_infos = &g.peer_infos;
+                connected
+                    .iter()
+                    .copied()
+                    .filter(|neighbor| {
+                        *neighbor == my_peer_id
+                            || peers.contains(neighbor)
+                            || peer_infos.contains_key(neighbor)
+                    })
+                    .collect()
+            };
             let entry = g.conn_rows.entry(pid).or_default();
             if version > entry.version {
                 entry.version = version;
-                entry.connected = connected;
+                entry.connected = known_neighbors;
                 changed = true;
             }
         };
@@ -1283,6 +1303,7 @@ mod tests {
     const CHAINED_C: PeerId = 3;
     const PEER_A: PeerId = 4;
     const GATEWAY_D: PeerId = 5;
+    const PEER_B: PeerId = 6;
 
     fn key(i: u8) -> Vec<u8> {
         vec![i; 32]
@@ -1549,6 +1570,121 @@ mod tests {
             .authenticated_peer_keys
             .get(&CHAINED_C)
             .is_some_and(|k| k == &key(0x33)));
+    }
+
+    #[test]
+    fn conn_rows_strip_unknown_neighbors_after_server_restart() {
+        // 复现:服务端重启后状态清零,老节点重连时把重启前的缓存拓扑
+        // 原样回传。其自身 conn 行可能仍引用早已离线的节点(例如与其他
+        // 节点重启前实例的半开 p2p 链路)。这类未知邻居不得入库转播,
+        // 否则全网客户端都会为幽灵 id 创建空 peer_info 占位条目。
+        let ghost: PeerId = 972326755;
+        let mut s = RouteState::new(SERVER_ID);
+        s.add_peer("net", PEER_A, &[], 1_000).unwrap();
+        s.add_peer("net", PEER_B, &[], 1_000).unwrap();
+        // B 同步自身 info(使推送走 ConnPeerList,与真实客户端一致)。
+        let req_b = sync_req(PEER_B, vec![conn_list_peer_info(PEER_B, 1, &key(0x55), 10)], None);
+        s.handle_sync_route_info_request("net", PEER_B, &req_b, 1_000)
+            .unwrap();
+        // A 上报自身行:与中继相连,同时携带幽灵邻居(对端已消失)。
+        let conn = ConnInfo::ConnPeerList(RouteConnPeerList {
+            peer_conn_infos: vec![conn_row_v(PEER_A, 5, &[SERVER_ID, ghost])],
+        });
+        let req = sync_req(
+            PEER_A,
+            vec![conn_list_peer_info(PEER_A, 1, &key(0x44), 9)],
+            Some(conn),
+        );
+        let outcome = s.handle_sync_route_info_request("net", PEER_A, &req, 1_000).unwrap();
+        assert!(outcome.route_changed);
+        let g = s.groups.get("net").unwrap();
+        let row = g.conn_rows.get(&PEER_A).unwrap();
+        assert!(row.connected.contains(&SERVER_ID));
+        assert!(
+            !row.connected.contains(&ghost),
+            "unknown neighbors must be stripped before storing"
+        );
+        // 转播给其他节点的行同样不得包含幽灵。
+        let update = s
+            .build_sync_route_info_request("net", PEER_B, 9, false, true, 2_000)
+            .unwrap();
+        let decoded = SyncRouteInfoRequest::decode(update.payload.as_slice()).unwrap();
+        let ConnInfo::ConnPeerList(list) = decoded.conn_info.unwrap() else {
+            panic!("expected conn peer list");
+        };
+        let row_a = list
+            .peer_conn_infos
+            .iter()
+            .find(|r| r.peer_id.as_ref().is_some_and(|pv| pv.peer_id == PEER_A))
+            .unwrap();
+        assert!(row_a.connected_peer_ids.contains(&SERVER_ID));
+        assert!(!row_a.connected_peer_ids.contains(&ghost));
+    }
+
+    #[test]
+    fn reconnect_after_restart_learns_newly_joined_peer() {
+        // 复现用户场景:服务端重启 → 老节点重连并回传缓存 → 新节点加入。
+        // 老节点的下一次增量推送必须携带新节点的 peer_info,否则老节点
+        // 无法为新节点路由 RPC 响应,双方打洞协调(get_ip_list 等)超时,
+        // 表现为"新重启的节点和没重启的节点互相不能连接"。
+        let old_peer = PEER_A;
+        let new_peer = PEER_B;
+        // 重启后:全新状态(重启前的内存路由表已丢失)。
+        let mut s = RouteState::new(SERVER_ID);
+        // 老节点重连,回传自身 info v6 与行 v16。
+        s.add_peer("net", old_peer, &[], 10_000).unwrap();
+        let lede_conn = ConnInfo::ConnPeerList(RouteConnPeerList {
+            peer_conn_infos: vec![conn_row_v(old_peer, 16, &[SERVER_ID])],
+        });
+        let lede_req = sync_req(
+            old_peer,
+            vec![conn_list_peer_info(old_peer, 6, &key(0x44), 9)],
+            Some(lede_conn),
+        );
+        let outcome = s
+            .handle_sync_route_info_request("net", old_peer, &lede_req, 10_100)
+            .unwrap();
+        assert!(outcome.session_changed);
+        // 新节点加入,上报自身 info v3 与行 v2。
+        s.add_peer("net", new_peer, &[], 12_000).unwrap();
+        let new_conn = ConnInfo::ConnPeerList(RouteConnPeerList {
+            peer_conn_infos: vec![conn_row_v(new_peer, 2, &[SERVER_ID])],
+        });
+        let new_req = sync_req(
+            new_peer,
+            vec![conn_list_peer_info(new_peer, 3, &key(0x55), 10)],
+            Some(new_conn),
+        );
+        s.handle_sync_route_info_request("net", new_peer, &new_req, 12_100)
+            .unwrap();
+        // 老节点的周期请求(空请求,保持会话活跃)。
+        let empty = sync_req(old_peer, vec![], None);
+        s.handle_sync_route_info_request("net", old_peer, &empty, 13_000)
+            .unwrap();
+        // 关键断言:推送给老节点的增量更新携带新节点的 peer_info。
+        let update = s
+            .build_sync_route_info_request("net", old_peer, 42, false, false, 14_000)
+            .unwrap();
+        let decoded = SyncRouteInfoRequest::decode(update.payload.as_slice()).unwrap();
+        let items = decoded
+            .peer_infos
+            .as_ref()
+            .map(|infos| infos.items.clone())
+            .unwrap_or_default();
+        assert!(
+            items
+                .iter()
+                .any(|info| info.peer_id == new_peer && info.version == 3),
+            "incremental push to the reconnected old node must carry the new peer's info, got: {items:?}"
+        );
+        // 且拓扑行必须体现新节点与中继的链路(老节点据此计算下一跳)。
+        let ConnInfo::ConnPeerList(list) = decoded.conn_info.unwrap() else {
+            panic!("expected conn peer list");
+        };
+        assert!(list
+            .peer_conn_infos
+            .iter()
+            .any(|row| row.connected_peer_ids.contains(&new_peer)));
     }
 
     #[test]
