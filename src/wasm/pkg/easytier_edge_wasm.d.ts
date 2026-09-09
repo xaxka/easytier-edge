@@ -37,11 +37,6 @@ export class WasmRpcCore {
     add_peer(network: string, peer_id: number, remote_public_key: Uint8Array, now_ms: bigint): void;
     build_route_update(network: string, peer_id: number, server_session_id: bigint, force_full: boolean, now_ms: bigint): Uint8Array;
     clean_expired(now_ms: bigint): string;
-    /**
-     * RELAY_PEER_ROUTES 开关:是否接受网关代发的第三方节点路由。
-     * 必须在 add_peer 之前调用;信令服务器拓扑下保持默认关闭。
-     */
-    set_relay_peer_routes(enabled: boolean): void;
     handle_request(network: string, authenticated_peer_id: number, payload: Uint8Array, now_ms: bigint): Uint8Array;
     handle_response(network: string, authenticated_peer_id: number, payload: Uint8Array, now_ms: bigint): boolean;
     /**
@@ -141,7 +136,6 @@ export interface InitOutput {
     readonly wasmrpccore_new: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly wasmrpccore_remove_peer: (a: number, b: number, c: number, d: number) => void;
     readonly wasmrpccore_set_avoid_relay_data: (a: number, b: number, c: number) => void;
-    readonly wasmrpccore_set_relay_peer_routes: (a: number, b: number) => void;
     readonly __wbindgen_export: (a: number) => void;
     readonly __wbindgen_add_to_stack_pointer: (a: number) => number;
     readonly __wbindgen_export2: (a: number, b: number) => number;

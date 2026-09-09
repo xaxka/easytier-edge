@@ -120,12 +120,6 @@ impl WasmRpcCore {
         Ok(())
     }
 
-    /// RELAY_PEER_ROUTES 开关:是否接受网关代发的第三方节点路由。
-    /// 必须在 add_peer 之前调用;信令服务器拓扑下保持默认关闭。
-    pub fn set_relay_peer_routes(&mut self, enabled: bool) {
-        self.routes.set_relay_peer_routes(enabled);
-    }
-
     pub fn add_peer(
         &mut self,
         network: &str,

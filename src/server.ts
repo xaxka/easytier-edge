@@ -120,7 +120,6 @@ export class EasyTierServer extends DurableObject<EasyTierEnv> {
 			this.config.hostname,
 			SERVER_PEER_ID,
 			this.config.disableRelayData,
-			this.config.relayPeerRoutes,
 		);
 		await this.restoreRouteIds();
 	}

@@ -39,14 +39,9 @@ export class EasyTierRpc {
 		hostname: string,
 		serverPeerId: number,
 		disableRelayData = false,
-		relayPeerRoutes = false,
 	) {
 		this.core = new WasmRpcCore(publicKey, hostname, serverPeerId);
 		if (disableRelayData) this.core.set_avoid_relay_data(true);
-		// RELAY_PEER_ROUTES(默认 false):链式接入关闭时拒收一切
-		// 网关代发的第三方路由,防止服务端重启后客户端缓存回传的
-		// 死节点路由被注入并广播。
-		this.core.set_relay_peer_routes(relayPeerRoutes);
 		this.serverPeerId = serverPeerId;
 	}
 
