@@ -1470,7 +1470,13 @@ mod tests {
         let req = sync_req(PEER_B, vec![], Some(honest));
         s.handle_sync_route_info_request("net", PEER_B, &req, 3_000)
             .unwrap();
-        let row = g.conn_rows.get(&PEER_B).unwrap();
+        let row = s
+            .groups
+            .get("net")
+            .unwrap()
+            .conn_rows
+            .get(&PEER_B)
+            .unwrap();
         assert_eq!(row.version, 5);
         assert!(row.connected.contains(&SERVER_ID));
         assert!(!row.connected.contains(&PEER_A));
